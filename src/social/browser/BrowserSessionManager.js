@@ -2,26 +2,6 @@
 // Gestiona el ciclo de vida de Chromium/Playwright, el login manual
 // del usuario, la persistencia cifrada de storage_state y la salud
 // de cada sesión por plataforma.
-//
-// Interfaz pública:
-//   initialize()
-//   login(platform)                     → { ok, message|error, savedAt? }
-//   startLogin(platform)                → { started, job }
-//   getLoginStatus(platform)            → { status, startedAt, finishedAt, result } | null
-//   withPage(platform, fn)              → ejecuta fn(page) con ciclo de vida seguro
-//   openPage(platform)                  → { page, context } | { error }
-//   closePage(platform, page)
-//   checkChallenge(page)                → { challenged, ... }
-//   markChallenge(platform, detail)
-//   isChallengeActive(platform)         → bool
-//   getChallengeInfo(platform)          → { active, until, remainingMs, last }
-//   clearChallenge(platform)            → { ok: true }
-//   hasSession(platform)                → bool
-//   healthCheck(platform)               → { ok, reason? }
-//   healthCheckAll()                    → resultados por plataforma
-//   invalidate(platform)                → borra storage_state y context
-//   getState()                          → snapshot
-//   shutdown()
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -44,21 +24,14 @@ async function getPlaywright() {
 }
 
 // ============================================================
-// CONSTANTES DE STEALTH
+// CONSTANTES DE STEALTH (LIMPIO PARA DOCKER + VNC)
 // ============================================================
 
 const CHROMIUM_ARGS = [
-    '--disable-blink-features=AutomationControlled',
-    '--disable-features=IsolateOrigins,site-per-process',
     '--no-sandbox',
     '--disable-setuid-sandbox',
     '--disable-dev-shm-usage',
-    '--disable-web-security',
-    '--disable-infobars',
-    '--disable-notifications',
-    '--disable-background-timer-throttling',
-    '--disable-backgrounding-occluded-windows',
-    '--disable-renderer-backgrounding',
+    '--disable-gpu',
     '--window-size=1280,900',
     '--lang=es-ES,es',
 ];
@@ -75,11 +48,9 @@ const STEALTH_SCRIPT = () => {
     Object.defineProperty(navigator, 'plugins', {
         get: () => [1, 2, 3, 4, 5],
     });
-    // window.chrome mínimo
     if (!window.chrome) {
         window.chrome = { runtime: {} };
     }
-    // permissions.query: devolver 'granted' para notifications
     const origQuery = window.navigator.permissions && window.navigator.permissions.query;
     if (origQuery) {
         window.navigator.permissions.query = (params) =>
@@ -165,11 +136,11 @@ export class BrowserSessionManager {
         this.challengeDetector = new ChallengeDetector();
 
         this._browser = null;
-        this._contexts = new Map();          // platform → BrowserContext
-        this._challengeUntil = new Map();    // platform → timestamp ms
-        this._lastChallenge = new Map();     // platform → { reason, detail, at }
-        this._lastHealthCheck = new Map();   // platform → timestamp
-        this._loginJobs = new Map();         // platform → { status, startedAt, finishedAt, result }
+        this._contexts = new Map();
+        this._challengeUntil = new Map();
+        this._lastChallenge = new Map();
+        this._lastHealthCheck = new Map();
+        this._loginJobs = new Map();
         this._encryption = null;
         this._sessionDir = null;
         this._initialized = false;
@@ -203,7 +174,6 @@ export class BrowserSessionManager {
             this.logger.info({ dir: this._sessionDir }, 'session directory created');
         }
 
-        // Verificar que Playwright está instalado (si no, fallar rápido)
         try {
             await getPlaywright();
         } catch (err) {
@@ -222,16 +192,9 @@ export class BrowserSessionManager {
     }
 
     // ============================================================
-    // LOGIN (síncrono: bloquea hasta completar o timeout)
+    // LOGIN
     // ============================================================
 
-    /**
-     * Abre un navegador VISIBLE para que el usuario haga login manual.
-     * Hace polling hasta detectar login OK, challenge persistente o timeout.
-     *
-     * @param {string} platform
-     * @returns {Promise<{ ok: boolean, message?: string, error?: string, savedAt?: number }>}
-     */
     async login(platform) {
         const cfg = LOGIN_CONFIGS[platform];
         if (!cfg) return { ok: false, error: 'unsupported_platform' };
@@ -244,13 +207,14 @@ export class BrowserSessionManager {
         let browser;
         try {
             browser = await pw.chromium.launch({
-                headless: false,          // login SIEMPRE visible
+                headless: false,
                 args: CHROMIUM_ARGS,
             });
         } catch (err) {
+            // AHORA REGISTRAMOS EL ERROR REAL EN LOS LOGS DE DOCKER
             this.logger.error(
-                { err: err.message },
-                'no se pudo lanzar Chromium visible. En headless usar xvfb.'
+                { platform, err: err.message, stack: err.stack },
+                '❌ FALLO CRÍTICO AL LANZAR CHROMIUM'
             );
             return { ok: false, error: 'browser_launch_failed', detail: err.message };
         }
@@ -279,7 +243,6 @@ export class BrowserSessionManager {
             while (Date.now() - startedAt < timeout) {
                 await page.waitForTimeout(TUNING.SCRAPING_LOGIN_POLL_MS);
 
-                // Detectar challenge (no abortamos: el usuario puede resolverlo)
                 try {
                     const ch = await this.challengeDetector.detect(page);
                     if (ch.challenged) {
@@ -288,7 +251,6 @@ export class BrowserSessionManager {
                     }
                 } catch (_) {}
 
-                // ¿Login OK?
                 try {
                     const ok = await cfg.isLoggedIn(page);
                     if (ok) {
@@ -324,16 +286,9 @@ export class BrowserSessionManager {
     }
 
     // ============================================================
-    // LOGIN EN BACKGROUND (para HTTP)
+    // LOGIN EN BACKGROUND
     // ============================================================
 
-    /**
-     * Inicia login en background. El caller hace polling a getLoginStatus().
-     * Evita bloquear la request HTTP durante 5 min.
-     *
-     * @param {string} platform
-     * @returns {{ started: boolean, error?: string, job: Object }}
-     */
     startLogin(platform) {
         const existing = this._loginJobs.get(platform);
         if (existing && existing.status === 'running') {
@@ -348,7 +303,6 @@ export class BrowserSessionManager {
         };
         this._loginJobs.set(platform, job);
 
-        // Ejecutar sin await; el caller hace polling a getLoginStatus
         this.login(platform)
             .then((result) => {
                 job.status = result.ok ? 'completed' : 'failed';
@@ -364,11 +318,6 @@ export class BrowserSessionManager {
         return { started: true, job };
     }
 
-    /**
-     * Devuelve el estado del último login job de la plataforma.
-     * @param {string} platform
-     * @returns {{ status, startedAt, finishedAt, result } | null}
-     */
     getLoginStatus(platform) {
         return this._loginJobs.get(platform) || null;
     }
@@ -377,14 +326,6 @@ export class BrowserSessionManager {
     // PAGES
     // ============================================================
 
-    /**
-     * Ejecuta `fn(page)` con un page nuevo, manejando challenge,
-     * errores y guardado de storage_state al terminar.
-     *
-     * @param {string} platform
-     * @param {(page: import('playwright').Page) => Promise<any>} fn
-     * @returns {Promise<any>}
-     */
     async withPage(platform, fn) {
         const opened = await this.openPage(platform);
         if (opened.error) {
@@ -396,7 +337,6 @@ export class BrowserSessionManager {
 
         try {
             const result = await fn(page);
-            // Detección final de challenge (por si acaso)
             try {
                 const ch = await this.challengeDetector.detect(page);
                 if (ch.challenged) {
@@ -416,14 +356,7 @@ export class BrowserSessionManager {
         }
     }
 
-    /**
-     * Abre un page con la sesión guardada. No abre browser si no hay sesión.
-     * @param {string} platform
-     * @returns {Promise<{ page, context } | { error, detail? }>}
-     */
     async openPage(platform) {
-        const env = getEnv();
-
         if (this.isChallengeActive(platform)) {
             return {
                 error: 'challenge_active',
@@ -449,7 +382,6 @@ export class BrowserSessionManager {
         const page = await context.newPage();
         page.setDefaultTimeout(TUNING.SCRAPING_PAGE_TIMEOUT_MS);
 
-        // Red de seguridad: detectar challenge en cada navegación
         page.on('framenavigated', (frame) => {
             if (frame !== page.mainFrame()) return;
             setTimeout(async () => {
@@ -469,13 +401,7 @@ export class BrowserSessionManager {
         return { page, context };
     }
 
-    /**
-     * Cierra el page y guarda storage_state actualizado.
-     * @param {string} platform
-     * @param {import('playwright').Page} page
-     */
     async closePage(platform, page) {
-        // Guardar storage_state ANTES de cerrar (por rotación de cookies)
         const context = this._contexts.get(platform);
         if (context) {
             try {
@@ -540,7 +466,6 @@ export class BrowserSessionManager {
     }
 
     markChallenge(platform, detail) {
-        const env = getEnv();
         const until = Date.now() + TUNING.SCRAPING_CHALLENGE_COOLDOWN_MS;
 
         this._challengeUntil.set(platform, until);
@@ -552,7 +477,6 @@ export class BrowserSessionManager {
         });
         this.metrics.challengesDetected++;
 
-        // Cerrar context para forzar re-login si el usuario decide hacerlo
         const ctx = this._contexts.get(platform);
         if (ctx) {
             ctx.close().catch(() => {});
@@ -592,12 +516,6 @@ export class BrowserSessionManager {
         };
     }
 
-    /**
-     * Limpia manualmente el cooldown de challenge.
-     * Útil si el usuario resolvió el CAPTCHA o rehizo login.
-     * @param {string} platform
-     * @returns {{ ok: true }}
-     */
     clearChallenge(platform) {
         this._challengeUntil.delete(platform);
         this._lastChallenge.delete(platform);
@@ -672,13 +590,6 @@ export class BrowserSessionManager {
     // HEALTH CHECK
     // ============================================================
 
-    /**
-     * Navega a home de la plataforma con la sesión cargada y verifica
-     * que no hay redirect a login ni challenge.
-     *
-     * @param {string} platform
-     * @returns {Promise<{ ok: boolean, reason?: string, detail?: any }>}
-     */
     async healthCheck(platform) {
         const cfg = LOGIN_CONFIGS[platform];
         if (!cfg) return { ok: false, reason: 'unsupported_platform' };
@@ -707,20 +618,17 @@ export class BrowserSessionManager {
                 });
                 await page.waitForTimeout(1500);
 
-                // Challenge?
                 const ch = await this.challengeDetector.detect(page);
                 if (ch.challenged) {
                     this.markChallenge(platform, ch);
                     return { ok: false, reason: 'challenge', detail: ch };
                 }
 
-                // ¿Sigue logueado?
                 const ok = await cfg.isLoggedIn(page);
                 if (!ok) {
                     return { ok: false, reason: 'session_expired' };
                 }
 
-                // Guardar storage_state actualizado
                 const state = await context.storageState();
                 this._saveSession(platform, state);
 
