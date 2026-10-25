@@ -11,8 +11,12 @@ services:
     environment:
       NODE_ENV: production
       DB_PATH: /app/data/vb-amber13.db
+      VB_AMBER_SESSION_DIR: /app/data/sessions
       HOST: 0.0.0.0
       PORT: "3000"
+      # En contenedor sin display: true. Para login en contenedor,
+      # usa: docker compose exec amber xvfb-run -a node scripts/login.js twitter
+      VB_AMBER_SCRAPING_HEADLESS: "true"
     volumes:
       - amber-data:/app/data
     healthcheck:
@@ -20,13 +24,13 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 20s
+      start_period: 30s
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
-    stop_grace_period: 20s
+    stop_grace_period: 25s
 
 volumes:
   amber-data:
