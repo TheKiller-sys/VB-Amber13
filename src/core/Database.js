@@ -430,6 +430,67 @@ export class DatabaseManager {
         ).run(Date.now(), decision, signalId);
     }
 
+    // ---------- SIGNALS (listado + reset) — admin ----------
+
+    listSignals({ limit = 100, platform = null, decision = null, kind = null } = {}) {
+        this._ensureInit();
+        let sql = 'SELECT * FROM social_signals';
+        const where = [];
+        const params = [];
+        if (platform) { where.push('platform = ?'); params.push(platform); }
+        if (decision) { where.push('decision = ?'); params.push(decision); }
+        if (kind) { where.push('kind = ?'); params.push(kind); }
+        if (where.length) sql += ' WHERE ' + where.join(' AND ');
+        sql += ' ORDER BY received_at DESC LIMIT ?';
+        params.push(Math.min(limit, 500));
+        return this._stmt(sql).all(...params);
+    }
+
+    getSignal(id) {
+        this._ensureInit();
+        return this._stmt('SELECT * FROM social_signals WHERE id = ?').get(id) || null;
+    }
+
+    countSignalsByDecision() {
+        this._ensureInit();
+        const rows = this._stmt(
+            'SELECT decision, COUNT(*) as c FROM social_signals GROUP BY decision'
+        ).all();
+        const out = {};
+        for (const row of rows) {
+            out[row.decision || 'pending'] = row.c;
+        }
+        return out;
+    }
+
+    resetSignalProcessing(id) {
+        this._ensureInit();
+        const result = this._stmt(
+            'UPDATE social_signals SET processed_at = NULL, decision = NULL WHERE id = ?'
+        ).run(id);
+        return result.changes > 0;
+    }
+
+    // ---------- CRISIS (listado) — admin ----------
+
+    listCrisis({ limit = 50 } = {}) {
+        this._ensureInit();
+        return this._stmt(
+            'SELECT * FROM crisis_events ORDER BY detected_at DESC LIMIT ?'
+        ).all(Math.min(limit, 200)).map(row => ({
+            ...row,
+            signal_ids: row.signal_ids ? JSON.parse(row.signal_ids) : null,
+        }));
+    }
+
+    // ---------- PENDING (delete duro para admin) ----------
+
+    deletePending(id) {
+        this._ensureInit();
+        const result = this._stmt('DELETE FROM social_pending WHERE id = ?').run(id);
+        return result.changes > 0;
+    }
+
     // ---------- AUDIT ----------
 
     audit({ category, event, severity = 'info', details = null }) {
