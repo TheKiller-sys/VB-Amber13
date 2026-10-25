@@ -6,10 +6,16 @@
 // Interfaz pública:
 //   initialize()
 //   login(platform)                     → { ok, message|error, savedAt? }
+//   startLogin(platform)                → { started, job }
+//   getLoginStatus(platform)            → { status, startedAt, finishedAt, result } | null
 //   withPage(platform, fn)              → ejecuta fn(page) con ciclo de vida seguro
+//   openPage(platform)                  → { page, context } | { error }
+//   closePage(platform, page)
 //   checkChallenge(page)                → { challenged, ... }
 //   markChallenge(platform, detail)
 //   isChallengeActive(platform)         → bool
+//   getChallengeInfo(platform)          → { active, until, remainingMs, last }
+//   clearChallenge(platform)            → { ok: true }
 //   hasSession(platform)                → bool
 //   healthCheck(platform)               → { ok, reason? }
 //   healthCheckAll()                    → resultados por plataforma
@@ -163,6 +169,7 @@ export class BrowserSessionManager {
         this._challengeUntil = new Map();    // platform → timestamp ms
         this._lastChallenge = new Map();     // platform → { reason, detail, at }
         this._lastHealthCheck = new Map();   // platform → timestamp
+        this._loginJobs = new Map();         // platform → { status, startedAt, finishedAt, result }
         this._encryption = null;
         this._sessionDir = null;
         this._initialized = false;
@@ -215,7 +222,7 @@ export class BrowserSessionManager {
     }
 
     // ============================================================
-    // LOGIN
+    // LOGIN (síncrono: bloquea hasta completar o timeout)
     // ============================================================
 
     /**
@@ -317,6 +324,56 @@ export class BrowserSessionManager {
     }
 
     // ============================================================
+    // LOGIN EN BACKGROUND (para HTTP)
+    // ============================================================
+
+    /**
+     * Inicia login en background. El caller hace polling a getLoginStatus().
+     * Evita bloquear la request HTTP durante 5 min.
+     *
+     * @param {string} platform
+     * @returns {{ started: boolean, error?: string, job: Object }}
+     */
+    startLogin(platform) {
+        const existing = this._loginJobs.get(platform);
+        if (existing && existing.status === 'running') {
+            return { started: false, error: 'already_running', job: existing };
+        }
+
+        const job = {
+            status: 'running',
+            startedAt: Date.now(),
+            finishedAt: null,
+            result: null,
+        };
+        this._loginJobs.set(platform, job);
+
+        // Ejecutar sin await; el caller hace polling a getLoginStatus
+        this.login(platform)
+            .then((result) => {
+                job.status = result.ok ? 'completed' : 'failed';
+                job.finishedAt = Date.now();
+                job.result = result;
+            })
+            .catch((err) => {
+                job.status = 'failed';
+                job.finishedAt = Date.now();
+                job.result = { ok: false, error: 'exception', detail: err.message };
+            });
+
+        return { started: true, job };
+    }
+
+    /**
+     * Devuelve el estado del último login job de la plataforma.
+     * @param {string} platform
+     * @returns {{ status, startedAt, finishedAt, result } | null}
+     */
+    getLoginStatus(platform) {
+        return this._loginJobs.get(platform) || null;
+    }
+
+    // ============================================================
     // PAGES
     // ============================================================
 
@@ -359,6 +416,11 @@ export class BrowserSessionManager {
         }
     }
 
+    /**
+     * Abre un page con la sesión guardada. No abre browser si no hay sesión.
+     * @param {string} platform
+     * @returns {Promise<{ page, context } | { error, detail? }>}
+     */
     async openPage(platform) {
         const env = getEnv();
 
@@ -407,6 +469,11 @@ export class BrowserSessionManager {
         return { page, context };
     }
 
+    /**
+     * Cierra el page y guarda storage_state actualizado.
+     * @param {string} platform
+     * @param {import('playwright').Page} page
+     */
     async closePage(platform, page) {
         // Guardar storage_state ANTES de cerrar (por rotación de cookies)
         const context = this._contexts.get(platform);
@@ -525,6 +592,19 @@ export class BrowserSessionManager {
         };
     }
 
+    /**
+     * Limpia manualmente el cooldown de challenge.
+     * Útil si el usuario resolvió el CAPTCHA o rehizo login.
+     * @param {string} platform
+     * @returns {{ ok: true }}
+     */
+    clearChallenge(platform) {
+        this._challengeUntil.delete(platform);
+        this._lastChallenge.delete(platform);
+        this.logger.info({ platform }, 'challenge cleared by user');
+        return { ok: true };
+    }
+
     // ============================================================
     // SESIÓN
     // ============================================================
@@ -583,6 +663,7 @@ export class BrowserSessionManager {
 
         this._challengeUntil.delete(platform);
         this._lastChallenge.delete(platform);
+        this._loginJobs.delete(platform);
 
         this.logger.warn({ platform }, 'session invalidada');
     }
@@ -594,6 +675,9 @@ export class BrowserSessionManager {
     /**
      * Navega a home de la plataforma con la sesión cargada y verifica
      * que no hay redirect a login ni challenge.
+     *
+     * @param {string} platform
+     * @returns {Promise<{ ok: boolean, reason?: string, detail?: any }>}
      */
     async healthCheck(platform) {
         const cfg = LOGIN_CONFIGS[platform];
@@ -606,9 +690,6 @@ export class BrowserSessionManager {
         if (this.isChallengeActive(platform)) {
             return { ok: false, reason: 'challenge_active' };
         }
-
-        const env = getEnv();
-        const wasHeadless = this._browser ? true : null;
 
         try {
             if (!this._browser) await this._launchBrowser();
@@ -678,6 +759,7 @@ export class BrowserSessionManager {
                 challenge: this.getChallengeInfo(p),
                 lastHealthCheck: this._lastHealthCheck.get(p) || null,
                 contextOpen: this._contexts.has(p),
+                loginJob: this._loginJobs.get(p) || null,
             };
         }
         return {
