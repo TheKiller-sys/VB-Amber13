@@ -3,15 +3,18 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>vb-amber13 · Dashboard</title>
+  <title>vb-amber13 · Control Center</title>
   <base href="/">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
+  <!-- ============================================================
+       SIDEBAR
+       ============================================================ -->
   <aside class="sidebar">
     <div class="sidebar-brand">
       <div class="brand-mark">
@@ -21,11 +24,13 @@
       </div>
       <div class="brand-text">
         <div class="brand-name">vb-amber13</div>
-        <div class="brand-sub">autonomous agent</div>
+        <div class="brand-sub">control center</div>
       </div>
     </div>
 
     <nav class="nav">
+      <div class="nav-section">Operación</div>
+
       <a class="nav-item" data-route="overview" href="#/overview">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <rect x="3" y="3" width="7" height="7" rx="1"/>
@@ -35,13 +40,6 @@
         </svg>
         <span>Overview</span>
       </a>
-      <a class="nav-item" data-route="persona" href="#/persona">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/>
-          <circle cx="12" cy="7" r="4"/>
-        </svg>
-        <span>Persona</span>
-      </a>
       <a class="nav-item" data-route="pending" href="#/pending">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="10"/>
@@ -50,6 +48,12 @@
         <span>Pending</span>
         <span class="nav-badge" id="pending-count" hidden>0</span>
       </a>
+      <a class="nav-item" data-route="signals" href="#/signals">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+        </svg>
+        <span>Signals</span>
+      </a>
       <a class="nav-item" data-route="actions" href="#/actions">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M22 11.08V12a10 10 0 11-5.93-9.14"/>
@@ -57,11 +61,45 @@
         </svg>
         <span>Actions</span>
       </a>
+
+      <div class="nav-section">Configuración</div>
+
+      <a class="nav-item" data-route="persona" href="#/persona">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/>
+          <circle cx="12" cy="7" r="4"/>
+        </svg>
+        <span>Persona</span>
+      </a>
       <a class="nav-item" data-route="sessions" href="#/sessions">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 11-7.778 7.778 5.5 5.5 0 017.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/>
         </svg>
         <span>Sessions</span>
+      </a>
+
+      <div class="nav-section">Diagnóstico</div>
+
+      <a class="nav-item" data-route="diagnostics" href="#/diagnostics">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+        </svg>
+        <span>Diagnostics</span>
+      </a>
+      <a class="nav-item" data-route="crisis" href="#/crisis">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+          <line x1="12" y1="9" x2="12" y2="13"/>
+          <line x1="12" y1="17" x2="12.01" y2="17"/>
+        </svg>
+        <span>Crisis</span>
+        <span class="nav-badge nav-badge-danger" id="crisis-badge" hidden>!</span>
+      </a>
+      <a class="nav-item" data-route="playground" href="#/playground">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 2v20M2 12h20"/>
+        </svg>
+        <span>Playground</span>
       </a>
       <a class="nav-item" data-route="audit" href="#/audit">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -73,6 +111,9 @@
         </svg>
         <span>Audit</span>
       </a>
+
+      <div class="nav-section">Sistema</div>
+
       <a class="nav-item" data-route="settings" href="#/settings">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="3"/>
@@ -90,6 +131,9 @@
     </div>
   </aside>
 
+  <!-- ============================================================
+       MAIN
+       ============================================================ -->
   <div class="main">
     <header class="topbar">
       <div class="topbar-left">
@@ -113,6 +157,9 @@
     <main class="content" id="content"></main>
   </div>
 
+  <!-- ============================================================
+       GLOBAL OVERLAYS
+       ============================================================ -->
   <div id="toasts" class="toasts"></div>
   <div id="modal-root"></div>
 
