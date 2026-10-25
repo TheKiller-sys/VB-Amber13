@@ -15,10 +15,6 @@ const MAX_TRACKED_LATENCIES = 50;
 // ============================================================
 
 class CircuitBreaker {
-    // El "= {}" final es OBLIGATORIO: permite invocar el constructor
-    // como `new CircuitBreaker()` sin argumentos. Sin él, la
-    // desestructuración de `undefined` lanza TypeError y el proceso
-    // muere en arranque (esto fue el bug que rompió el deploy en Render).
     constructor({ failuresBeforeOpen = 3, openMs = 60000 } = {}) {
         this.failuresBeforeOpen = failuresBeforeOpen;
         this.openMs = openMs;
@@ -121,7 +117,6 @@ export class LLMBridge {
         this.maxOutputTokens = this.env.LLM_MAX_OUTPUT_TOKENS;
         this.temperature = this.env.LLM_TEMPERATURE;
 
-        // Sin argumentos: los defaults (3, 60s) se aplican gracias al "= {}".
         this.breaker = new CircuitBreaker();
 
         this.metrics = {
@@ -341,6 +336,53 @@ export class LLMBridge {
         return {
             ...result,
             skipped,
+        };
+    }
+
+    // ============================================================
+    // PREVIEW / TEST (para el dashboard admin)
+    // ============================================================
+
+    /**
+     * Devuelve los prompts que se enviarían al LLM para una persona+signal,
+     * SIN llamar al LLM. Útil para debugging del prompt.
+     */
+    previewPrompts({ persona, signal, task = null, context = {} }) {
+        if (!persona) throw new Error('persona requerida');
+        if (!signal?.platform) throw new Error('signal.platform requerido');
+
+        return {
+            systemPrompt: this._buildSocialSystemPrompt({ persona, signal, task, context }),
+            userMessage: this._buildSocialUserMessage({ persona, signal, task }),
+            provider: this.provider.name,
+            model: this.model,
+            temperature: this.temperature,
+            maxTokens: this.maxOutputTokens,
+            estimatedInputChars:
+                this._buildSocialSystemPrompt({ persona, signal, task, context }).length +
+                this._buildSocialUserMessage({ persona, signal, task }).length,
+        };
+    }
+
+    /**
+     * Ejecuta generateForSocial pero SIN pasar por el loop ni publicar.
+     * Devuelve el draft tal cual (o null si falla).
+     * Consume tokens del LLM.
+     */
+    async testGeneration({ persona, signal, task = null, context = {} }) {
+        const t0 = Date.now();
+        const result = await this.generateForSocial({ persona, signal, task, context });
+        if (!result) {
+            return { ok: false, error: 'llm_failed', elapsedMs: Date.now() - t0 };
+        }
+        return {
+            ok: true,
+            text: result.text,
+            skipped: result.skipped,
+            usage: result.usage,
+            latencyMs: result.latencyMs,
+            elapsedMs: Date.now() - t0,
+            circuit: this.breaker.getStats(),
         };
     }
 
