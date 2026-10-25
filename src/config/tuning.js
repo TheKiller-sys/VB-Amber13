@@ -44,6 +44,41 @@ export const TUNING = Object.freeze({
 
     // ---------- LOGGER ----------
     LOG_MAX_STRING_LENGTH: 1000,
+
+    // ============================================================
+    // SCRAPING (transporte alternativo a API oficial)
+    // ============================================================
+
+    // Delays humanos entre acciones (jitter aleatorio)
+    SCRAPING_HUMAN_DELAY_MIN_MS: 800,
+    SCRAPING_HUMAN_DELAY_MAX_MS: 2500,
+
+    // Timeouts internos de Playwright
+    SCRAPING_PAGE_TIMEOUT_MS: 45000,
+    SCRAPING_NAV_TIMEOUT_MS: 30000,
+
+    // Cuánto espera el sistema a que el usuario termine el login manual
+    SCRAPING_LOGIN_TIMEOUT_MS: 300_000, // 5 min
+
+    // Cada cuánto se revalida la sesión guardada
+    SCRAPING_HEALTH_CHECK_INTERVAL_MS: 900_000, // 15 min
+
+    // Límites conservadores (más bajos que API para reducir detección)
+    SCRAPING_MAX_POSTS_PER_DAY: 3,
+    SCRAPING_MAX_REPLIES_PER_HOUR: 2,
+    SCRAPING_MIN_MS_BETWEEN_POSTS: 3 * 60 * 60 * 1000, // 3h
+
+    // Cooldown automático cuando se detecta un challenge.
+    // Pasado este tiempo, la plataforma se reanuda sola (el challenge puede ser transitorio).
+    SCRAPING_CHALLENGE_COOLDOWN_MS: 60 * 60 * 1000, // 1h
+
+    // Polling para detectar login exitoso (ms entre checks)
+    SCRAPING_LOGIN_POLL_MS: 2000,
+
+    // Cuántos posts/comentarios leer por ciclo en scraping
+    SCRAPING_READ_MAX_ITEMS: 10,
+    SCRAPING_SCROLL_ITERATIONS: 3,
+    SCRAPING_SCROLL_PX: 800,
 });
 
 export function tuning(key, fallback) {
