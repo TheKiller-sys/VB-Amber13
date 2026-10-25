@@ -1240,6 +1240,430 @@ body::before {
 }
 
 /* ============================================================
+   TABS (para el editor visual de persona)
+   ============================================================ */
+
+.tabs {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 20px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.tabs::-webkit-scrollbar { display: none; }
+
+.tab {
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-3);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+  font-family: inherit;
+}
+.tab:hover { color: var(--text-2); }
+.tab.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+.tab .tab-count {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  background: var(--bg-3);
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-2);
+}
+
+/* ============================================================
+   FORM SECTIONS (persona editor)
+   ============================================================ */
+
+.form-section {
+  background: rgba(19, 19, 26, 0.6);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+  margin-bottom: 16px;
+  animation: slideUp 0.3s ease both;
+}
+.form-section:last-child { margin-bottom: 0; }
+
+.form-section-title {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.form-section-sub {
+  font-size: 12px;
+  color: var(--text-3);
+  margin-bottom: 18px;
+}
+
+.form-row {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 14px;
+  margin-bottom: 14px;
+}
+.form-row-3 {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+  margin-bottom: 14px;
+}
+.form-row:last-child,
+.form-row-3:last-child { margin-bottom: 0; }
+
+@media (max-width: 700px) {
+  .form-row, .form-row-3 { grid-template-columns: 1fr; }
+}
+
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+.form-field:last-child { margin-bottom: 0; }
+.form-field .hint {
+  font-size: 11px;
+  color: var(--text-4);
+  margin-top: -2px;
+}
+
+/* ============================================================
+   SLIDER
+   ============================================================ */
+
+.slider-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.slider-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  font-size: 12px;
+  gap: 10px;
+}
+.slider-label {
+  color: var(--text-2);
+  font-weight: 500;
+}
+.slider-value {
+  color: var(--accent-hi);
+  font-weight: 600;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  min-width: 40px;
+  text-align: right;
+}
+
+input[type="range"].slider {
+  width: 100%;
+  height: 4px;
+  background: var(--bg-3);
+  border-radius: 2px;
+  outline: none;
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+}
+input[type="range"].slider::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  cursor: pointer;
+  box-shadow: 0 2px 8px var(--accent-glow-strong);
+  border: none;
+}
+input[type="range"].slider::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: none;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  cursor: pointer;
+  box-shadow: 0 2px 8px var(--accent-glow-strong);
+}
+
+/* ============================================================
+   CHIP INPUT
+   ============================================================ */
+
+.chip-input {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  min-height: 38px;
+  align-items: center;
+  transition: all 0.15s ease;
+}
+.chip-input:focus-within {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 4px 2px 9px;
+  background: var(--bg-4);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--text);
+  line-height: 1.5;
+}
+.chip-remove {
+  background: transparent;
+  border: none;
+  color: var(--text-3);
+  cursor: pointer;
+  padding: 2px 5px;
+  border-radius: 3px;
+  line-height: 1;
+  font-size: 13px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.1s ease;
+}
+.chip-remove:hover {
+  color: var(--danger-hi);
+  background: var(--danger-bg);
+}
+.chip-new {
+  flex: 1;
+  min-width: 80px;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  padding: 2px 4px;
+}
+.chip-new::placeholder { color: var(--text-4); }
+
+/* ============================================================
+   REPEATER
+   ============================================================ */
+
+.repeater {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.repeater-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 2fr auto;
+  gap: 8px;
+  padding: 10px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  align-items: center;
+}
+.repeater-row-2 {
+  grid-template-columns: 1fr 1fr auto;
+}
+.repeater-row-3 {
+  grid-template-columns: 1fr 1fr 1fr auto;
+}
+@media (max-width: 700px) {
+  .repeater-row, .repeater-row-2, .repeater-row-3 {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+}
+.repeater-row input,
+.repeater-row select {
+  padding: 6px 8px;
+  font-size: 12px;
+}
+.repeater-row .slider-field {
+  gap: 4px;
+}
+.repeater-remove {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.repeater-add {
+  align-self: flex-start;
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+/* ============================================================
+   TOGGLE
+   ============================================================ */
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+.toggle-row:last-child { border-bottom: none; }
+.toggle-row:first-child { padding-top: 0; }
+
+.toggle-info { flex: 1; min-width: 0; }
+.toggle-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+}
+.toggle-desc {
+  font-size: 11px;
+  color: var(--text-3);
+  margin-top: 2px;
+  line-height: 1.5;
+}
+
+.toggle {
+  position: relative;
+  width: 38px;
+  height: 22px;
+  background: var(--bg-3);
+  border-radius: 11px;
+  cursor: pointer;
+  transition: background 0.2s ease;
+  flex-shrink: 0;
+  border: none;
+  padding: 0;
+}
+.toggle::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  background: var(--text-3);
+  border-radius: 50%;
+  transition: all 0.2s ease;
+}
+.toggle.on {
+  background: var(--accent-glow-strong);
+}
+.toggle.on::after {
+  left: 18px;
+  background: var(--accent-hi);
+  box-shadow: 0 2px 6px var(--accent-glow-strong);
+}
+
+/* ============================================================
+   TIME RANGE
+   ============================================================ */
+
+.time-range {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.time-range input[type="time"] {
+  width: 110px;
+  padding: 8px 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  outline: none;
+}
+.time-range input[type="time"]:focus {
+  border-color: var(--border-focus);
+}
+.time-range .sep {
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+/* ============================================================
+   NUMBER INPUT
+   ============================================================ */
+
+.num-input {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  outline: none;
+  transition: all 0.15s ease;
+}
+.num-input:focus {
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+/* ============================================================
+   SAVE BAR (sticky en persona)
+   ============================================================ */
+
+.save-bar {
+  position: sticky;
+  bottom: 20px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 20px;
+  background: rgba(19, 19, 26, 0.95);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid var(--border-hi);
+  border-radius: var(--radius-lg);
+  margin-top: 20px;
+  box-shadow: var(--shadow-lg);
+  z-index: 10;
+  flex-wrap: wrap;
+}
+.save-bar-info {
+  font-size: 12px;
+  color: var(--text-3);
+}
+.save-bar-info strong {
+  color: var(--warning-hi);
+}
+.save-bar-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* ============================================================
    RESPONSIVE
    ============================================================ */
 
