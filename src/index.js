@@ -7,13 +7,16 @@ import { systemCore } from './core/SystemCore.js';
 import { wire } from './wiring.js';
 import { createApp, startServer } from './http/index.js';
 
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 
 async function main() {
     const env = getEnv();               // valida y falla rápido si falta algo
     const logger = getLogger();
 
-    logger.info({ version: VERSION, env: env.NODE_ENV }, 'starting vb-amber13');
+    logger.info(
+        { version: VERSION, env: env.NODE_ENV, transport: env.VB_AMBER_TRANSPORT },
+        'starting vb-amber13'
+    );
 
     let httpServer = null;
     let shuttingDown = false;
@@ -64,15 +67,37 @@ async function main() {
         // 2. Inicializar todo (DB + módulos en orden)
         await systemCore.initialize();
 
-        // 3. HTTP
+        // 3. Aviso si scraping y no hay sesiones
+        if (env.VB_AMBER_TRANSPORT === 'scraping') {
+            const sessionsState = services.sessions?.getState?.();
+            if (sessionsState) {
+                const withSession = Object.entries(sessionsState.platforms)
+                    .filter(([, s]) => s.hasSession)
+                    .map(([p]) => p);
+                if (withSession.length === 0) {
+                    logger.warn(
+                        '⚠️  Scraping activo pero no hay sesiones guardadas. ' +
+                        'Usa POST /api/sessions/:platform/login o `npm run login <platform>`.'
+                    );
+                } else {
+                    logger.info(
+                        { platforms: withSession },
+                        'scraping sessions disponibles'
+                    );
+                }
+            }
+        }
+
+        // 4. HTTP
         const app = createApp({
             personaRepo: services.personaRepo,
             loop: services.loop,
             adapterManager: services.adapterManager,
+            sessions: services.sessions,
         });
         httpServer = await startServer(app, { port: env.PORT, host: env.HOST });
 
-        // 4. Loop autónomo
+        // 5. Loop autónomo
         systemCore.start();
 
         logger.info(
@@ -80,6 +105,7 @@ async function main() {
                 port: env.PORT,
                 mode: env.VB_AMBER_OPERATING_MODE,
                 safety: env.VB_AMBER_SAFETY_LEVEL,
+                transport: env.VB_AMBER_TRANSPORT,
             },
             '✅ vb-amber13 ready'
         );
