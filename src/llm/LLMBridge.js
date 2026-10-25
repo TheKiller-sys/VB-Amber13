@@ -4,7 +4,7 @@
 
 import { getLogger } from '../utils/logger.js';
 import { getEnv } from '../config/env.js';
-import { withRetry, withTimeout, RetryError } from '../utils/retry.js';
+import { withRetry } from '../utils/retry.js';
 import { getProvider, executeProviderRequest } from './providers.js';
 
 const MAX_TRACKED_FAILURES = 100;
@@ -15,7 +15,11 @@ const MAX_TRACKED_LATENCIES = 50;
 // ============================================================
 
 class CircuitBreaker {
-    constructor({ failuresBeforeOpen = 3, openMs = 60000 }) {
+    // El "= {}" final es OBLIGATORIO: permite invocar el constructor
+    // como `new CircuitBreaker()` sin argumentos. Sin él, la
+    // desestructuración de `undefined` lanza TypeError y el proceso
+    // muere en arranque (esto fue el bug que rompió el deploy en Render).
+    constructor({ failuresBeforeOpen = 3, openMs = 60000 } = {}) {
         this.failuresBeforeOpen = failuresBeforeOpen;
         this.openMs = openMs;
         this._consecutiveFailures = 0;
@@ -117,6 +121,7 @@ export class LLMBridge {
         this.maxOutputTokens = this.env.LLM_MAX_OUTPUT_TOKENS;
         this.temperature = this.env.LLM_TEMPERATURE;
 
+        // Sin argumentos: los defaults (3, 60s) se aplican gracias al "= {}".
         this.breaker = new CircuitBreaker();
 
         this.metrics = {
