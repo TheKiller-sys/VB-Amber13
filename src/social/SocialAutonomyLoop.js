@@ -1,6 +1,11 @@
 // src/social/SocialAutonomyLoop.js
 // El corazón del sistema. Orquesta:
 //   ingest → clasificar → decidir → generar → guardar → validar → publicar/pending
+//
+// Novedades respecto a la versión API:
+//   - Respeta challenge activo por plataforma (skip rápido)
+//   - Si un publish devuelve challenge_detected, dispara crisis global
+//   - Los adapters de scraping no devuelven externalId; el audit lo refleja
 
 import { getLogger } from '../utils/logger.js';
 import { TUNING } from '../config/tuning.js';
@@ -46,6 +51,7 @@ export class SocialAutonomyLoop {
             ticks: 0,
             signalsProcessed: 0,
             ignored: 0,
+            skippedByChallenge: 0,
             escalated: 0,
             draftsGenerated: 0,
             draftsRejectedByGuard: 0,
@@ -53,12 +59,16 @@ export class SocialAutonomyLoop {
             draftsPending: 0,
             draftsPublished: 0,
             errors: 0,
+            challengesTriggered: 0,
         };
     }
 
     async initialize() {
         this.logger.info(
-            { mode: getEnv().VB_AMBER_OPERATING_MODE },
+            {
+                mode: getEnv().VB_AMBER_OPERATING_MODE,
+                transport: getEnv().VB_AMBER_TRANSPORT,
+            },
             'SocialAutonomyLoop listo'
         );
     }
@@ -101,7 +111,7 @@ export class SocialAutonomyLoop {
                 return;
             }
 
-            // 4. Procesar cada señal (secuencial para no saturar la API)
+            // 4. Procesar cada señal (secuencial para no saturar la API/browser)
             for (const signal of signals.slice(0, TUNING.SIGNAL_MAX_PER_CYCLE)) {
                 try {
                     await this._processSignal(signal, persona);
@@ -133,6 +143,17 @@ export class SocialAutonomyLoop {
 
     async _processSignal(signal, persona) {
         this.metrics.signalsProcessed++;
+
+        // 0. Challenge activo en la plataforma del signal → skip rápido
+        if (this.adapterManager.isChallengeActive(signal.platform)) {
+            this.metrics.skippedByChallenge++;
+            this.logger.debug(
+                { signalId: signal.id, platform: signal.platform },
+                'skip signal: challenge active on platform'
+            );
+            this.database.markSignalProcessed(signal.id, DECISIONS.SKIP);
+            return;
+        }
 
         // 1. Clasificar
         const classification = this.classifier.classify(signal);
@@ -215,7 +236,6 @@ export class SocialAutonomyLoop {
                 'PersonaGuard rechazó draft'
             );
 
-            // Si fue escalate, crear pending de escalate
             if (guardResult.decision === 'escalate') {
                 this.metrics.escalated++;
                 this._createPendingAction({
@@ -279,13 +299,9 @@ export class SocialAutonomyLoop {
     // ============================================================
 
     _shouldIgnore(signal, classification, persona) {
-        // Plataforma deshabilitada
         if (!persona.isPlatformEnabled(signal.platform)) return true;
-
-        // SPAM en DM
         if (classification.classification === CLASSIFICATIONS.DM_SPAM) return true;
 
-        // Autor bloqueado
         if (signal.author && persona.boundaries.neverReplyTo.length > 0) {
             const a = String(signal.author).toLowerCase();
             for (const blocked of persona.boundaries.neverReplyTo) {
@@ -297,7 +313,6 @@ export class SocialAutonomyLoop {
     }
 
     _shouldEscalateWithoutDraft(signal, classification, persona) {
-        // Crisis ya manejada por CrisisDetector, pero reglas custom pueden forzar
         for (const rule of persona.rules) {
             if (rule.then !== 'escalate_to_human') continue;
             if (this._ruleMatches(rule, signal)) return true;
@@ -359,6 +374,7 @@ export class SocialAutonomyLoop {
                 text: signal.text,
                 externalId: signal.externalId,
                 threadParentId: signal.threadParentId,
+                raw: signal.raw || null,
             },
             persona_version: persona.version,
             status: 'pending',
@@ -410,6 +426,14 @@ export class SocialAutonomyLoop {
             return { ok: false, error: 'expired' };
         }
 
+        if (this.adapterManager.isChallengeActive(pending.platform)) {
+            return {
+                ok: false,
+                error: 'challenge_active',
+                detail: this.adapterManager.sessions?.getChallengeInfo?.(pending.platform) || null,
+            };
+        }
+
         // Si es escalate puro → solo marcar aprobado
         if (pending.action === 'escalate') {
             this.database.resolvePending(pendingId, 'approved_escalate', approvedBy);
@@ -428,6 +452,7 @@ export class SocialAutonomyLoop {
             text: pending.signal_payload.text,
             externalId: pending.signal_payload.externalId,
             threadParentId: pending.signal_payload.threadParentId,
+            raw: pending.signal_payload.raw || null,
         });
 
         const guardResult = this.guard.validate({
@@ -460,6 +485,10 @@ export class SocialAutonomyLoop {
 
             return { ok: true, ...result, pending };
         } catch (err) {
+            // Si fue challenge, propagar
+            if (String(err.message).startsWith('challenge_detected')) {
+                return { ok: false, error: 'challenge_detected', detail: err.detail || null };
+            }
             return { ok: false, error: err.message };
         }
     }
@@ -494,15 +523,25 @@ export class SocialAutonomyLoop {
     // ============================================================
 
     async _publish({ signal, persona, action, draft, classification, approvedBy = 'auto' }) {
-        const params = this._buildActionParams({
-            signal,
-            action,
-            draft,
-        });
+        const params = this._buildActionParams({ signal, action, draft });
 
         const result = await this.adapterManager.execute(action, params);
 
         if (!result.ok) {
+            // Challenge detectado por el adapter → crisis global + throw
+            if (result.error === 'challenge_detected') {
+                this.metrics.challengesTriggered++;
+                this.crisis.forceCrisis('scraping_challenge', {
+                    platform: signal.platform,
+                    signalId: signal.id,
+                    action,
+                    detail: result.detail || null,
+                });
+                const err = new Error(`challenge_detected:${signal.platform}`);
+                err.detail = result.detail || null;
+                throw err;
+            }
+
             this.metrics.errors++;
             this.logger.error(
                 {
@@ -512,7 +551,9 @@ export class SocialAutonomyLoop {
                 },
                 'publish failed'
             );
-            throw new Error(result.error || 'publish_failed');
+            const e = new Error(result.error || 'publish_failed');
+            e.adapterResult = result;
+            throw e;
         }
 
         // Persistir acción
@@ -532,6 +573,7 @@ export class SocialAutonomyLoop {
             metrics: {
                 classification,
                 signalKind: signal.kind,
+                transport: getEnv().VB_AMBER_TRANSPORT,
             },
         };
 
@@ -545,6 +587,8 @@ export class SocialAutonomyLoop {
                 platform: signal.platform,
                 action,
                 approvedBy,
+                transport: getEnv().VB_AMBER_TRANSPORT,
+                externalId: result.externalId || null,
             },
         });
 
@@ -573,7 +617,6 @@ export class SocialAutonomyLoop {
             case 'twitter_dm_reply':
                 return { text: draft, recipientId: signal.author };
             case 'instagram_post':
-                // Requiere imagen. Si el signal no tiene una, falla limpiamente.
                 return {
                     text: draft,
                     imageUrl: signal.raw?.imageUrl || null,
@@ -637,11 +680,13 @@ export class SocialAutonomyLoop {
         return {
             running: !this._paused,
             paused: this._paused,
+            transport: getEnv().VB_AMBER_TRANSPORT,
             crisis: this.crisis.getState(),
             metrics: { ...this.metrics },
             ingester: this.ingester.getState(),
             classifier: this.classifier.getState(),
             memory: this.memory.getState(),
+            sessions: this.adapterManager.getSessionsState?.() || null,
         };
     }
 
