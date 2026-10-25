@@ -88,12 +88,17 @@ async function main() {
             }
         }
 
-        // 4. HTTP
+        // 4. HTTP (con TODOS los módulos para el admin router)
         const app = createApp({
             personaRepo: services.personaRepo,
             loop: services.loop,
             adapterManager: services.adapterManager,
             sessions: services.sessions,
+            llm: services.llm,
+            memory: services.memory,
+            classifier: services.classifier,
+            ingester: services.ingester,
+            crisis: services.crisis,
         });
         httpServer = await startServer(app, { port: env.PORT, host: env.HOST });
 
