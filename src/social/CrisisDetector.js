@@ -6,6 +6,8 @@
 //  - Cualquier DM urgente
 //  - Cualquier mención con patrón de amenaza legal
 //  - Fallo repetido de plataformas (>3 fallos en 10min)
+//  - NUEVO: challenge de scraping detectado en cualquier plataforma
+//  - NUEVO: sesión de scraping expirada (llamado desde el loop)
 
 import { getLogger } from '../utils/logger.js';
 import { getEnv } from '../config/env.js';
@@ -38,6 +40,7 @@ export class CrisisDetector {
             crisisDetected: 0,
             crisisResolved: 0,
             pauses: 0,
+            forced: 0,
         };
     }
 
@@ -101,6 +104,37 @@ export class CrisisDetector {
         }
 
         return { crisis: false, reason: null };
+    }
+
+    /**
+     * Fuerza una crisis desde fuera del detector (p.ej. challenge de scraping).
+     * Respeta si ya hay una crisis activa.
+     *
+     * @param {string} reason
+     * @param {Object} details — { signalIds?, platform?, ... }
+     * @returns {{ crisis: boolean, reason: string }}
+     */
+    forceCrisis(reason, details = {}) {
+        this.metrics.forced++;
+        if (this._paused) {
+            return { crisis: true, reason: this._pauseReason };
+        }
+        const signalIds = Array.isArray(details.signalIds)
+            ? details.signalIds
+            : (details.platform ? [`platform:${details.platform}`] : []);
+        this._triggerCrisis(reason, signalIds);
+
+        // Audit extra con details completos
+        try {
+            this.database.audit({
+                category: 'crisis',
+                event: 'crisis_forced',
+                severity: 'error',
+                details: { reason, ...details },
+            });
+        } catch (_) {}
+
+        return { crisis: true, reason };
     }
 
     _triggerCrisis(reason, signalIds) {
