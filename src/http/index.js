@@ -13,8 +13,9 @@ import { createPersonaRouter } from './routes/persona.js';
 import { createSocialRouter } from './routes/social.js';
 import { createHealthRouter } from './routes/health.js';
 import { createWebhooksRouter } from './routes/webhooks.js';
+import { createSessionsRouter } from './routes/sessions.js';
 
-export function createApp({ personaRepo, loop, adapterManager }) {
+export function createApp({ personaRepo, loop, adapterManager, sessions = null }) {
     const env = getEnv();
     const app = express();
 
@@ -58,6 +59,7 @@ export function createApp({ personaRepo, loop, adapterManager }) {
     api.use(requireApiKey);
     api.use('/persona', createPersonaRouter({ personaRepo }));
     api.use('/social', createSocialRouter({ loop }));
+    api.use('/sessions', createSessionsRouter({ sessions }));
     app.use('/api', api);
 
     app.use(notFoundHandler);
