@@ -1,32 +1,30 @@
 {
   "name": "vb-amber13",
-  "version": "1.0.0",
-  "description": "VB Amber13 — Cognitive autonomous agent for social media persona management",
+  "version": "0.2.0",
+  "description": "Autonomous social media persona agent with draft-by-default safety and optional scraping transport",
   "type": "module",
   "main": "src/index.js",
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=20"
   },
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch src/index.js",
+    "dev": "NODE_ENV=development node src/index.js",
     "init-db": "node scripts/init-db.js",
+    "login": "node scripts/login.js",
     "test": "node --test tests/",
-    "lint": "node --check src/index.js"
+    "playwright:install": "playwright install chromium"
   },
   "dependencies": {
-    "better-sqlite3": "^11.3.0",
-    "compression": "^1.7.4",
+    "better-sqlite3": "^11.0.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
-    "express": "^4.21.0",
-    "express-rate-limit": "^7.4.0",
-    "helmet": "^8.0.0",
-    "pino": "^9.4.0",
-    "pino-pretty": "^11.2.2",
-    "twitter-api-v2": "^1.18.0",
+    "express": "^4.19.2",
+    "helmet": "^7.1.0",
+    "pino": "^9.0.0",
+    "pino-pretty": "^11.0.0",
+    "playwright": "^1.48.0",
+    "twitter-api-v2": "^1.17.0",
     "zod": "^3.23.8"
-  },
-  "optionalDependencies": {},
-  "license": "MIT"
+  }
 }
