@@ -67,6 +67,36 @@ const EnvSchema = z.object({
     VB_AMBER_LOOP_INTERVAL_MS: INT(90000, 30000, 3600000),
     VB_AMBER_CRISIS_NEGATIVE_THRESHOLD: INT(3, 1, 100),
     VB_AMBER_CRISIS_WINDOW_MIN: INT(60, 5, 1440),
+
+    // ============================================================
+    // TRANSPORTE (API oficial vs scraping con sesión guardada)
+    // ============================================================
+    VB_AMBER_TRANSPORT: z.enum(['api', 'scraping']).default('api'),
+
+    // Directorio donde viven los storage_state cifrados (uno por plataforma)
+    VB_AMBER_SESSION_DIR: z.string().default('./data/sessions'),
+
+    // Clave maestra para cifrar storage_state en reposo.
+    // Obligatoria si VB_AMBER_TRANSPORT=scraping. >= 32 chars.
+    VB_AMBER_SESSION_ENCRYPTION_KEY: z.string().default(''),
+
+    // Headless para operaciones (login SIEMPRE es visible).
+    // En contenedor sin xvfb debe ser true (menos indetectable pero funciona).
+    VB_AMBER_SCRAPING_HEADLESS: BOOL.default(false),
+
+    // Timeout máximo para que el usuario complete el login manual.
+    VB_AMBER_SCRAPING_LOGIN_TIMEOUT_MS: INT(300000, 60000, 900000),
+
+    // Cada cuánto se revalida la sesión guardada (navegando a home).
+    VB_AMBER_SCRAPING_HEALTH_CHECK_INTERVAL_MS: INT(900000, 60000, 3600000),
+
+    // Delays humanos entre acciones (jitter).
+    VB_AMBER_SCRAPING_HUMAN_DELAY_MIN_MS: INT(800, 100, 5000),
+    VB_AMBER_SCRAPING_HUMAN_DELAY_MAX_MS: INT(2500, 500, 10000),
+
+    // Límites conservadores para scraping (mucho más bajos que API).
+    VB_AMBER_SCRAPING_DAILY_POST_LIMIT: INT(3, 1, 20),
+    VB_AMBER_SCRAPING_HOURLY_REPLY_LIMIT: INT(2, 1, 10),
 });
 
 let cachedEnv = null;
@@ -83,27 +113,62 @@ export function loadEnv() {
 
     const env = parsed.data;
 
-    // Validaciones condicionales
-    if (env.LLM_PROVIDER === 'openai' && !env.LLM_API_KEY) {
-        console.error('❌ LLM_PROVIDER=openai requiere LLM_API_KEY');
-        process.exit(1);
+    // ============================================================
+    // Validaciones condicionales por TRANSPORTE
+    // ============================================================
+    if (env.VB_AMBER_TRANSPORT === 'api') {
+        // Requisitos de API oficial
+        if (env.LLM_PROVIDER === 'openai' && !env.LLM_API_KEY) {
+            console.error('❌ LLM_PROVIDER=openai requiere LLM_API_KEY');
+            process.exit(1);
+        }
+        if (env.LLM_PROVIDER === 'anthropic' && !env.LLM_API_KEY) {
+            console.error('❌ LLM_PROVIDER=anthropic requiere LLM_API_KEY');
+            process.exit(1);
+        }
+        if (env.TWITTER_ENABLED && (!env.TWITTER_API_KEY || !env.TWITTER_ACCESS_TOKEN)) {
+            console.error('❌ TWITTER_ENABLED=true requiere API_KEY y ACCESS_TOKEN');
+            process.exit(1);
+        }
+        if (env.INSTAGRAM_ENABLED && !env.INSTAGRAM_ACCESS_TOKEN) {
+            console.error('❌ INSTAGRAM_ENABLED=true requiere INSTAGRAM_ACCESS_TOKEN');
+            process.exit(1);
+        }
+        if (env.LINKEDIN_ENABLED && !env.LINKEDIN_ACCESS_TOKEN) {
+            console.error('❌ LINKEDIN_ENABLED=true requiere LINKEDIN_ACCESS_TOKEN');
+            process.exit(1);
+        }
     }
-    if (env.LLM_PROVIDER === 'anthropic' && !env.LLM_API_KEY) {
-        console.error('❌ LLM_PROVIDER=anthropic requiere LLM_API_KEY');
-        process.exit(1);
+
+    if (env.VB_AMBER_TRANSPORT === 'scraping') {
+        // Requisitos de scraping
+        if (!env.VB_AMBER_SESSION_ENCRYPTION_KEY ||
+            env.VB_AMBER_SESSION_ENCRYPTION_KEY.length < 32) {
+            console.error(
+                '❌ VB_AMBER_TRANSPORT=scraping requiere VB_AMBER_SESSION_ENCRYPTION_KEY ' +
+                'con >= 32 caracteres (clave maestra para cifrar sesiones)'
+            );
+            process.exit(1);
+        }
+        if (env.VB_AMBER_SCRAPING_HUMAN_DELAY_MAX_MS < env.VB_AMBER_SCRAPING_HUMAN_DELAY_MIN_MS) {
+            console.error(
+                '❌ VB_AMBER_SCRAPING_HUMAN_DELAY_MAX_MS debe ser >= ' +
+                'VB_AMBER_SCRAPING_HUMAN_DELAY_MIN_MS'
+            );
+            process.exit(1);
+        }
+        // LLM sigue siendo necesario (el scraping sustituye la capa social, no el cerebro)
+        if (env.LLM_PROVIDER === 'openai' && !env.LLM_API_KEY) {
+            console.error('❌ LLM_PROVIDER=openai requiere LLM_API_KEY (también en scraping)');
+            process.exit(1);
+        }
+        if (env.LLM_PROVIDER === 'anthropic' && !env.LLM_API_KEY) {
+            console.error('❌ LLM_PROVIDER=anthropic requiere LLM_API_KEY (también en scraping)');
+            process.exit(1);
+        }
     }
-    if (env.TWITTER_ENABLED && (!env.TWITTER_API_KEY || !env.TWITTER_ACCESS_TOKEN)) {
-        console.error('❌ TWITTER_ENABLED=true requiere API_KEY y ACCESS_TOKEN');
-        process.exit(1);
-    }
-    if (env.INSTAGRAM_ENABLED && !env.INSTAGRAM_ACCESS_TOKEN) {
-        console.error('❌ INSTAGRAM_ENABLED=true requiere INSTAGRAM_ACCESS_TOKEN');
-        process.exit(1);
-    }
-    if (env.LINKEDIN_ENABLED && !env.LINKEDIN_ACCESS_TOKEN) {
-        console.error('❌ LINKEDIN_ENABLED=true requiere LINKEDIN_ACCESS_TOKEN');
-        process.exit(1);
-    }
+
+    // Validaciones de producción (siempre)
     if (env.NODE_ENV === 'production' && env.VB_AMBER_ADMIN_API_KEY.length < 32) {
         console.error('❌ En producción, VB_AMBER_ADMIN_API_KEY debe tener >= 32 chars');
         process.exit(1);
@@ -123,4 +188,8 @@ export function getEnv() {
 
 export function isProduction() {
     return getEnv().NODE_ENV === 'production';
+}
+
+export function isScrapingMode() {
+    return getEnv().VB_AMBER_TRANSPORT === 'scraping';
 }
