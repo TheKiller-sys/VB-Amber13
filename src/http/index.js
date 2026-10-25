@@ -30,6 +30,7 @@ import { createSocialRouter } from './routes/social.js';
 import { createHealthRouter } from './routes/health.js';
 import { createWebhooksRouter } from './routes/webhooks.js';
 import { createSessionsRouter } from './routes/sessions.js';
+import { createAdminRouter } from './routes/admin.js';
 
 // ============================================================
 // __dirname equivalente en ESM
@@ -50,11 +51,26 @@ const STATIC_DIR = path.join(__dirname, 'static');
  *   - personaRepo    {PersonaRepository}
  *   - loop           {SocialAutonomyLoop}
  *   - adapterManager {AdapterManager}
- *   - sessions       {BrowserSessionManager|null}  null si transport=api
+ *   - sessions       {BrowserSessionManager|null}
+ *   - llm            {LLMBridge}
+ *   - memory         {SocialMemory}
+ *   - classifier     {SignalClassifier}
+ *   - ingester       {SignalIngester}
+ *   - crisis         {CrisisDetector}
  *
  * @returns {import('express').Application}
  */
-export function createApp({ personaRepo, loop, adapterManager, sessions = null }) {
+export function createApp({
+    personaRepo,
+    loop,
+    adapterManager,
+    sessions = null,
+    llm,
+    memory,
+    classifier,
+    ingester,
+    crisis,
+}) {
     const env = getEnv();
     const logger = getLogger().child({ component: 'http' });
     const app = express();
@@ -66,10 +82,6 @@ export function createApp({ personaRepo, loop, adapterManager, sessions = null }
     // 1. Seguridad + CORS
     // ============================================================
 
-    // helmet por defecto bloquea la carga de Google Fonts con CSP.
-    // Desactivamos SOLO contentSecurityPolicy. El resto de protecciones
-    // (X-Frame-Options, X-Content-Type-Options, HSTS si aplica, etc.)
-    // siguen activas.
     app.use(helmet({
         contentSecurityPolicy: false,
         crossOriginEmbedderPolicy: false,
@@ -121,7 +133,6 @@ export function createApp({ personaRepo, loop, adapterManager, sessions = null }
     }));
 
     app.get('/', (_req, res, next) => {
-        // Si el dashboard no está compilado/presente, no rompemos la app.
         res.sendFile(path.join(STATIC_DIR, 'index.html'), (err) => {
             if (err) {
                 logger.warn(
@@ -156,6 +167,17 @@ export function createApp({ personaRepo, loop, adapterManager, sessions = null }
     api.use('/persona', createPersonaRouter({ personaRepo }));
     api.use('/social', createSocialRouter({ loop }));
     api.use('/sessions', createSessionsRouter({ sessions }));
+    api.use('/admin', createAdminRouter({
+        personaRepo,
+        loop,
+        llm,
+        memory,
+        classifier,
+        ingester,
+        crisis,
+        adapterManager,
+        sessions,
+    }));
 
     app.use('/api', api);
 
@@ -171,11 +193,10 @@ export function createApp({ personaRepo, loop, adapterManager, sessions = null }
 
     app.use(errorHandler);
 
-    // Log de rutas montadas (útil para debugging en producción)
     logger.info(
         {
             static: STATIC_DIR,
-            api: ['/persona', '/social', '/sessions'],
+            api: ['/persona', '/social', '/sessions', '/admin'],
             public: ['/', '/health', '/webhooks'],
         },
         'http routes mounted'
@@ -188,13 +209,6 @@ export function createApp({ personaRepo, loop, adapterManager, sessions = null }
 // START SERVER
 // ============================================================
 
-/**
- * Arranca el servidor HTTP en el puerto/host indicados.
- *
- * @param {import('express').Application} app
- * @param {Object} opts — { port, host }
- * @returns {Promise<import('node:http').Server>}
- */
 export async function startServer(app, { port, host }) {
     return new Promise((resolve, reject) => {
         const server = app.listen(port, host, () => {
