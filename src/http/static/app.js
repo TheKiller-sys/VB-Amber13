@@ -1,6 +1,6 @@
 // src/http/static/app.js
 // SPA vanilla del dashboard. Sin dependencias externas. Hash routing.
-// Incluye editor visual completo de PersonaConfig (todas las secciones).
+// Incluye editor visual completo de PersonaConfig y navegación móvil.
 
 const LS_KEY = 'vb_amber_api_key';
 const REFRESH_MS = 15000;
@@ -96,13 +96,6 @@ function getNested(obj, path) {
 
 function deepClone(o) {
   return JSON.parse(JSON.stringify(o));
-}
-
-function arraysEqual(a, b) {
-  if (a === b) return true;
-  if (!a || !b || a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
-  return true;
 }
 
 // ============================================================
@@ -672,8 +665,7 @@ VIEWS.persona = {
   renderEditor() {
     const content = document.getElementById('content');
     const version = this.original?.version;
-    const isNew = !this.original;
-
+    
     content.innerHTML = `
       <div class="row-between mb-16" style="flex-wrap: wrap; gap: 8px;">
         <div class="row">
@@ -877,7 +869,7 @@ VIEWS.persona = {
   },
 
   // ============================================================
-  // Event binding helpers (called after renderTab)
+  // Event binding helpers
   // ============================================================
 
   bindCommon(container) {
@@ -887,15 +879,25 @@ VIEWS.persona = {
       const type = el.dataset.bindType;
       const handler = () => {
         let val;
-        if (type === 'number') val = parseFloat(el.value);
-        else val = el.value;
+        if (type === 'number') {
+          val = parseFloat(el.value);
+          if (isNaN(val)) val = 0; // fallback
+        } else {
+          val = el.value;
+        }
         setNested(this.draft, path, val);
         if (el.type === 'range') {
           const display = container.querySelector(`[data-slider-value="${path}"]`);
           if (display) display.textContent = parseFloat(el.value).toFixed(2);
         }
-        if (path === 'operatingMode') document.getElementById('p-head-mode').textContent = val;
-        if (path === 'safetyLevel') document.getElementById('p-head-safety').textContent = val;
+        if (path === 'operatingMode') {
+          const hMode = document.getElementById('p-head-mode');
+          if (hMode) hMode.textContent = val;
+        }
+        if (path === 'safetyLevel') {
+          const hSafety = document.getElementById('p-head-safety');
+          if (hSafety) hSafety.textContent = val;
+        }
         this.markDirty();
       };
       el.addEventListener('input', handler);
@@ -957,7 +959,6 @@ VIEWS.persona = {
 
   refreshChipInput(el, path) {
     const items = getNested(this.draft, path) || [];
-    // Remove only chips, keep input
     el.querySelectorAll('.chip').forEach(c => c.remove());
     const input = el.querySelector('[data-chip-new]');
     items.forEach(it => {
@@ -970,7 +971,8 @@ VIEWS.persona = {
         this.markDirty();
         this.refreshChipInput(el, path);
       });
-      el.insertBefore(chip, input);
+      if (input) el.insertBefore(chip, input);
+      else el.appendChild(chip);
     });
   },
 
@@ -1191,7 +1193,13 @@ VIEWS.persona = {
       <div class="form-section">
         <div class="form-section-title">Horario de silencio</div>
         <div class="form-section-sub">No publica dentro de esta ventana en la timezone del agente.</div>
-        ${this.fieldToggle({ path: 'boundaries.__hasQuietHours', label: 'Activar horario de silencio', desc: 'Bloquea publicaciones entre dos horas del día' })}
+        <div class="toggle-row">
+          <div class="toggle-info">
+            <div class="toggle-label">Activar horario de silencio</div>
+            <div class="toggle-desc">Bloquea publicaciones entre dos horas del día</div>
+          </div>
+          <button class="toggle ${hasQuietHours ? 'on' : ''}" id="p-quiet-toggle" type="button"></button>
+        </div>
         <div id="p-quiet-hours" style="${hasQuietHours ? '' : 'display:none;'}">
           <div class="time-range mt-12">
             <input type="time" id="p-quiet-start" value="${esc(start)}">
@@ -1218,28 +1226,22 @@ VIEWS.persona = {
     this.bindCommon(el);
 
     // Special handler for quiet hours toggle
-    const toggles = el.querySelectorAll('[data-toggle-path]');
-    toggles.forEach(btn => {
-      if (btn.dataset.togglePath !== 'boundaries.__hasQuietHours') return;
-      btn.addEventListener('click', () => {
-        const qh = el.querySelector('#p-quiet-hours');
-        const isOn = btn.classList.contains('on');
-        if (isOn) {
-          this.draft.boundaries.neverPostBetween = ['23:00', '07:00'];
-          qh.style.display = 'block';
-        } else {
-          this.draft.boundaries.neverPostBetween = null;
-          qh.style.display = 'none';
-        }
-        this.markDirty();
-      });
+    el.querySelector('#p-quiet-toggle').addEventListener('click', (e) => {
+      const btn = e.currentTarget;
+      const qh = el.querySelector('#p-quiet-hours');
+      const isOn = btn.classList.contains('on');
+      
+      btn.classList.toggle('on', !isOn);
+      
+      if (!isOn) {
+        this.draft.boundaries.neverPostBetween = ['23:00', '07:00'];
+        qh.style.display = 'block';
+      } else {
+        this.draft.boundaries.neverPostBetween = null;
+        qh.style.display = 'none';
+      }
+      this.markDirty();
     });
-
-    // Init the toggle visual state based on actual quiet hours
-    if (hasQuietHours) {
-      const btn = el.querySelector('[data-toggle-path="boundaries.__hasQuietHours"]');
-      if (btn) btn.classList.add('on');
-    }
 
     el.querySelector('#p-quiet-start')?.addEventListener('change', (e) => {
       const start = e.target.value;
@@ -2284,9 +2286,34 @@ function setupGlobalListeners() {
   });
 }
 
+// NUEVO: Navegación móvil
+function setupMobileNav() {
+  const toggle = document.getElementById('menu-toggle');
+  const sidebar = document.querySelector('.sidebar');
+  const backdrop = document.getElementById('sidebar-backdrop');
+
+  if (!toggle || !sidebar || !backdrop) return;
+
+  const closeSidebar = () => {
+    sidebar.classList.remove('open');
+    backdrop.classList.remove('active');
+  };
+
+  toggle.addEventListener('click', () => {
+    sidebar.classList.toggle('open');
+    backdrop.classList.toggle('active');
+  });
+
+  backdrop.addEventListener('click', closeSidebar);
+
+  // Cerrar sidebar automáticamente al navegar
+  window.addEventListener('hashchange', closeSidebar);
+}
+
 async function boot() {
   setupRouter();
   setupGlobalListeners();
+  setupMobileNav(); // <-- Inicializa el menú hamburguesa
 
   if (!state.apiKey) {
     showApiKeyModal();
