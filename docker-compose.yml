@@ -5,7 +5,10 @@ services:
     container_name: vb-amber13
     restart: unless-stopped
     ports:
-      - "127.0.0.1:3000:3000"
+      # Dashboard: accesible desde fuera en el 3005, internamente usa el 3000
+      - "3005:3000" 
+      # noVNC: accesible desde fuera en el 6080
+      - "6080:6080" 
     env_file:
       - .env
     environment:
@@ -13,10 +16,8 @@ services:
       DB_PATH: /app/data/vb-amber13.db
       VB_AMBER_SESSION_DIR: /app/data/sessions
       HOST: 0.0.0.0
-      PORT: "3000"
-      # En contenedor sin display: true. Para login en contenedor,
-      # usa: docker compose exec amber xvfb-run -a node scripts/login.js twitter
-      VB_AMBER_SCRAPING_HEADLESS: "true"
+      PORT: "3000" # Interno del contenedor, NO lo cambies
+      VB_AMBER_SCRAPING_HEADLESS: "false"
     volumes:
       - amber-data:/app/data
     healthcheck:
@@ -31,6 +32,10 @@ services:
         max-size: "10m"
         max-file: "3"
     stop_grace_period: 25s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
 
 volumes:
   amber-data:
