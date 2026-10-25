@@ -2,10 +2,8 @@
 // El corazón del sistema. Orquesta:
 //   ingest → clasificar → decidir → generar → guardar → validar → publicar/pending
 //
-// Novedades respecto a la versión API:
-//   - Respeta challenge activo por plataforma (skip rápido)
-//   - Si un publish devuelve challenge_detected, dispara crisis global
-//   - Los adapters de scraping no devuelven externalId; el audit lo refleja
+// Respeta challenge activo por plataforma. Si un publish devuelve
+// challenge_detected, dispara crisis global.
 
 import { getLogger } from '../utils/logger.js';
 import { TUNING } from '../config/tuning.js';
@@ -77,9 +75,6 @@ export class SocialAutonomyLoop {
     // TICK PRINCIPAL
     // ============================================================
 
-    /**
-     * Un ciclo completo. Llamado por SystemCore cada N ms.
-     */
     async tick() {
         if (this._paused) {
             this.logger.debug('loop paused, skipping tick');
@@ -90,28 +85,24 @@ export class SocialAutonomyLoop {
         const t0 = Date.now();
 
         try {
-            // 1. Check crisis resuelta
             this.crisis.checkResume();
             if (this.crisis.isPaused()) {
                 this.logger.debug('crisis pause active, skipping cycle');
                 return;
             }
 
-            // 2. Persona vigente
             const persona = this.personaRepo.getLatest();
             if (!persona) {
                 this.logger.warn('sin PersonaConfig; nada que hacer');
                 return;
             }
 
-            // 3. Ingestar señales
             const signals = await this.ingester.ingest();
             if (signals.length === 0) {
                 this.logger.debug('no fresh signals');
                 return;
             }
 
-            // 4. Procesar cada señal (secuencial para no saturar la API/browser)
             for (const signal of signals.slice(0, TUNING.SIGNAL_MAX_PER_CYCLE)) {
                 try {
                     await this._processSignal(signal, persona);
@@ -144,7 +135,6 @@ export class SocialAutonomyLoop {
     async _processSignal(signal, persona) {
         this.metrics.signalsProcessed++;
 
-        // 0. Challenge activo en la plataforma del signal → skip rápido
         if (this.adapterManager.isChallengeActive(signal.platform)) {
             this.metrics.skippedByChallenge++;
             this.logger.debug(
@@ -155,10 +145,8 @@ export class SocialAutonomyLoop {
             return;
         }
 
-        // 1. Clasificar
         const classification = this.classifier.classify(signal);
 
-        // 2. Crisis check (registra y puede pausar)
         const crisisResult = this.crisis.evaluate(signal, classification);
         if (crisisResult.crisis) {
             this.logger.warn(
@@ -168,14 +156,12 @@ export class SocialAutonomyLoop {
             return;
         }
 
-        // 3. ¿Ignorar?
         if (this._shouldIgnore(signal, classification, persona)) {
             this.metrics.ignored++;
             this.database.markSignalProcessed(signal.id, DECISIONS.IGNORE);
             return;
         }
 
-        // 4. ¿Escalar (sin generar draft)?
         if (this._shouldEscalateWithoutDraft(signal, classification, persona)) {
             this.metrics.escalated++;
             this._createPendingAction({
@@ -190,7 +176,6 @@ export class SocialAutonomyLoop {
             return;
         }
 
-        // 5. Elegir acción
         const action = actionForSignal(signal.platform, signal.kind);
         if (!action) {
             this.logger.debug(
@@ -202,7 +187,6 @@ export class SocialAutonomyLoop {
             return;
         }
 
-        // 6. Generar draft con LLM
         const draft = await this._generateDraft(signal, persona, classification);
         if (!draft || !draft.text) {
             this.logger.debug({ signalId: signal.id }, 'no draft generated');
@@ -218,7 +202,6 @@ export class SocialAutonomyLoop {
 
         this.metrics.draftsGenerated++;
 
-        // 7. PersonaGuard
         const guardResult = this.guard.validate({
             persona,
             draft: draft.text,
@@ -254,7 +237,6 @@ export class SocialAutonomyLoop {
             return;
         }
 
-        // 8. ¿Requiere aprobación humana?
         const needsApproval = persona.requiresApproval({
             platform: signal.platform,
             classification: classification.classification,
@@ -274,7 +256,6 @@ export class SocialAutonomyLoop {
             return;
         }
 
-        // 9. Publicar automáticamente
         try {
             await this._publish({
                 signal,
@@ -291,6 +272,42 @@ export class SocialAutonomyLoop {
                 'publish failed'
             );
             this.database.markSignalProcessed(signal.id, 'error');
+        }
+    }
+
+    // ============================================================
+    // REPROCESS (admin)
+    // ============================================================
+
+    /**
+     * Reprocesa una señal ya existente en DB (útil para reintentar tras error).
+     * NO pasa por el ingester; lee de DB y llama directamente a _processSignal.
+     * @param {string} signalId
+     * @returns {Promise<{ ok: boolean, error?: string }>}
+     */
+    async reprocessSignalById(signalId) {
+        const row = this.database.getSignal(signalId);
+        if (!row) return { ok: false, error: 'not_found' };
+
+        const persona = this.personaRepo.getLatest();
+        if (!persona) return { ok: false, error: 'no_persona' };
+
+        const signal = makeSignal({
+            id: row.id,
+            platform: row.platform,
+            kind: row.kind,
+            author: row.author,
+            text: row.text,
+            receivedAt: row.received_at,
+            externalId: null,
+            threadParentId: null,
+        });
+
+        try {
+            await this._processSignal(signal, persona);
+            return { ok: true };
+        } catch (err) {
+            return { ok: false, error: err.message };
         }
     }
 
@@ -414,9 +431,6 @@ export class SocialAutonomyLoop {
         return pending;
     }
 
-    /**
-     * Aprueba y publica una pending action.
-     */
     async approvePending(pendingId, { approvedBy = 'user' } = {}) {
         const pending = this.database.getPending(pendingId);
         if (!pending) return { ok: false, error: 'not_found' };
@@ -434,13 +448,11 @@ export class SocialAutonomyLoop {
             };
         }
 
-        // Si es escalate puro → solo marcar aprobado
         if (pending.action === 'escalate') {
             this.database.resolvePending(pendingId, 'approved_escalate', approvedBy);
             return { ok: true, action: 'escalate', pending };
         }
 
-        // Guard final (revalidación con persona actual)
         const persona = this.personaRepo.getLatest();
         if (!persona) return { ok: false, error: 'no_persona' };
 
@@ -470,7 +482,6 @@ export class SocialAutonomyLoop {
             };
         }
 
-        // Publicar
         try {
             const result = await this._publish({
                 signal,
@@ -485,7 +496,6 @@ export class SocialAutonomyLoop {
 
             return { ok: true, ...result, pending };
         } catch (err) {
-            // Si fue challenge, propagar
             if (String(err.message).startsWith('challenge_detected')) {
                 return { ok: false, error: 'challenge_detected', detail: err.detail || null };
             }
@@ -493,9 +503,6 @@ export class SocialAutonomyLoop {
         }
     }
 
-    /**
-     * Rechaza una pending action.
-     */
     rejectPending(pendingId, { rejectedBy = 'user', reason = null } = {}) {
         const pending = this.database.getPending(pendingId);
         if (!pending) return { ok: false, error: 'not_found' };
@@ -528,7 +535,6 @@ export class SocialAutonomyLoop {
         const result = await this.adapterManager.execute(action, params);
 
         if (!result.ok) {
-            // Challenge detectado por el adapter → crisis global + throw
             if (result.error === 'challenge_detected') {
                 this.metrics.challengesTriggered++;
                 this.crisis.forceCrisis('scraping_challenge', {
@@ -556,7 +562,6 @@ export class SocialAutonomyLoop {
             throw e;
         }
 
-        // Persistir acción
         const actionRecord = {
             id: `action_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`,
             platform: signal.platform,
