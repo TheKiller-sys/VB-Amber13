@@ -1,17 +1,24 @@
 // src/http/static/app.js
-// SPA vanilla del dashboard. Sin dependencias. Hash routing.
+// SPA vanilla del dashboard. Sin dependencias externas. Hash routing.
 
 const LS_KEY = 'vb_amber_api_key';
 const REFRESH_MS = 15000;
 const HEALTH_MS = 5000;
 
+// ============================================================
+// STATE
+// ============================================================
+
 const state = {
   apiKey: localStorage.getItem(LS_KEY) || '',
   route: 'overview',
   viewData: {},
-  refreshing: false,
-  timers: {},
+  timers: {
+    health: null,
+    route: null,
+  },
   lastHealth: null,
+  lastHealthAt: 0,
   config: {
     transport: 'unknown',
     mode: 'unknown',
@@ -86,11 +93,33 @@ function fmtDate(ts) {
   });
 }
 
+function fmtUptime(seconds) {
+  if (!seconds || seconds < 0) return '0s';
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function fmtBytes(b) {
+  if (!b || b < 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let i = 0;
+  while (b >= 1024 && i < units.length - 1) { b /= 1024; i++; }
+  return `${b.toFixed(1)} ${units[i]}`;
+}
+
 function truncate(s, n = 100) {
   if (!s) return '';
   const str = String(s);
   return str.length > n ? str.slice(0, n) + '…' : str;
 }
+
+// ============================================================
+// ICONS
+// ============================================================
 
 const ICONS = {
   success: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>',
@@ -106,6 +135,12 @@ const ICONS = {
   user: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>',
   clock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
   key: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 11-7.778 7.778 5.5 5.5 0 017.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>',
+  zap: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>',
+  signal: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>',
+  play_circle: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polygon points="10 8 16 12 10 16 10 8"/></svg>',
+  code: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>',
+  download: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>',
+  shield: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
 };
 
 // ============================================================
@@ -141,6 +176,8 @@ function openModal(html) {
     if (e.target.classList.contains('modal-backdrop')) closeModal();
   });
 }
+
+window.closeModal = closeModal;
 
 function showApiKeyModal() {
   openModal(`
@@ -179,7 +216,7 @@ async function saveApiKey() {
   closeModal();
   try {
     await api('/api/persona').catch((e) => {
-      if (e.status === 404) return; // sin persona aún, ok
+      if (e.status === 404) return;
       throw e;
     });
     toast('API Key guardada', 'success');
@@ -192,9 +229,6 @@ async function saveApiKey() {
   }
 }
 
-// Exponer al inline onclick
-window.closeModal = closeModal;
-
 // ============================================================
 // HEALTH POLLING
 // ============================================================
@@ -203,18 +237,33 @@ async function pollHealth() {
   try {
     const data = await fetch('/health/readyz').then(r => r.json());
     state.lastHealth = data;
+    state.lastHealthAt = Date.now();
     updateSidebarStatus(data);
     updateLiveIndicator(data);
+    await pollCrisisBadge();
   } catch (_) {
     updateSidebarStatus(null);
     updateLiveIndicator(null);
   }
 }
 
+async function pollCrisisBadge() {
+  if (!state.apiKey) return;
+  try {
+    const r = await api('/api/social/state').catch(() => null);
+    const crisis = r?.state?.crisis;
+    const badge = document.getElementById('crisis-badge');
+    if (badge && crisis?.paused) {
+      badge.removeAttribute('hidden');
+    } else if (badge) {
+      badge.setAttribute('hidden', '');
+    }
+  } catch (_) {}
+}
+
 function updateSidebarStatus(data) {
   const el = document.getElementById('sidebar-status');
   if (!el) return;
-  const dot = el.querySelector('.status-dot');
   const text = el.querySelector('.status-text');
   el.classList.remove('ok', 'err', 'warn');
   if (!data) {
@@ -237,15 +286,19 @@ function updateLiveIndicator(data) {
 }
 
 // ============================================================
-// NAVIGATION
+// ROUTER
 // ============================================================
 
 const ROUTES = {
   overview: { title: 'Overview', sub: 'Estado general del agente' },
-  persona: { title: 'Persona', sub: 'Configuración de identidad y voz' },
   pending: { title: 'Pending', sub: 'Acciones esperando aprobación' },
+  signals: { title: 'Signals', sub: 'Señales ingeridas del sistema' },
   actions: { title: 'Actions', sub: 'Historial de acciones publicadas' },
+  persona: { title: 'Persona', sub: 'Configuración de identidad y voz' },
   sessions: { title: 'Sessions', sub: 'Gestión de sesiones de scraping' },
+  diagnostics: { title: 'Diagnostics', sub: 'Salud de módulos y sistema' },
+  crisis: { title: 'Crisis', sub: 'Estado e historial de crisis' },
+  playground: { title: 'Playground', sub: 'Prueba el LLM sin publicar' },
   audit: { title: 'Audit', sub: 'Log de auditoría de decisiones' },
   settings: { title: 'Settings', sub: 'Configuración del sistema' },
 };
@@ -262,9 +315,9 @@ function navigate(route) {
   document.getElementById('page-title').textContent = meta.title;
   document.getElementById('page-sub').textContent = meta.sub;
 
-  stopRouteTimers();
+  stopRouteTimer();
   render();
-  startRouteTimers();
+  startRouteTimer();
 }
 
 function render() {
@@ -274,14 +327,14 @@ function render() {
   if (fn) fn.render(content);
 }
 
-function stopRouteTimers() {
+function stopRouteTimer() {
   if (state.timers.route) {
     clearInterval(state.timers.route);
     state.timers.route = null;
   }
 }
 
-function startRouteTimers() {
+function startRouteTimer() {
   const fn = VIEWS[state.route];
   if (fn && fn.refresh) {
     state.timers.route = setInterval(() => {
@@ -292,25 +345,29 @@ function startRouteTimers() {
 }
 
 // ============================================================
-// VIEW: OVERVIEW
+// VIEWS
 // ============================================================
 
 const VIEWS = {};
+
+// ------------------------------------------------------------
+// VIEW: OVERVIEW
+// ------------------------------------------------------------
 
 VIEWS.overview = {
   render(root) {
     root.innerHTML = `
       <div class="metrics-grid" id="ov-metrics">
-        ${this.skeletonMetric('Uptime')}
-        ${this.skeletonMetric('Ciclos')}
-        ${this.skeletonMetric('Pending')}
-        ${this.skeletonMetric('Acciones')}
+        ${this.skelMetric('Uptime')}
+        ${this.skelMetric('Ciclos')}
+        ${this.skelMetric('Pending')}
+        ${this.skelMetric('Acciones')}
       </div>
       <div class="card mb-16" id="ov-system">
         <div class="skeleton skeleton-line" style="width: 40%"></div>
         <div class="skeleton skeleton-line" style="width: 70%"></div>
       </div>
-      <div class="card" id="ov-controls">
+      <div class="card mb-16" id="ov-controls">
         <div class="card-header">
           <div>
             <div class="card-title">Control manual</div>
@@ -320,7 +377,22 @@ VIEWS.overview = {
         <div class="row" style="flex-wrap: wrap; gap: 8px;">
           <button class="btn btn-secondary" id="btn-tick">${ICONS.refresh} Ejecutar ciclo</button>
           <button class="btn btn-secondary" id="btn-toggle-pause">${ICONS.pause} Pausar</button>
-          <button class="btn btn-danger" id="btn-resume-crisis">${ICONS.warning} Resolver crisis</button>
+          <button class="btn btn-warning" id="btn-resume-crisis">${ICONS.warning} Resolver crisis</button>
+          <button class="btn btn-secondary" id="btn-view-diagnostics">Diagnostics →</button>
+        </div>
+      </div>
+      <div class="card" id="ov-quick">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Quick actions</div>
+            <div class="card-sub">Atajos a las vistas más usadas</div>
+          </div>
+        </div>
+        <div class="row" style="flex-wrap: wrap; gap: 8px;">
+          <button class="btn btn-secondary btn-sm" data-nav="pending">${ICONS.clock} Ver pending</button>
+          <button class="btn btn-secondary btn-sm" data-nav="signals">${ICONS.signal} Ver señales</button>
+          <button class="btn btn-secondary btn-sm" data-nav="playground">${ICONS.zap} Probar LLM</button>
+          <button class="btn btn-secondary btn-sm" data-nav="persona">${ICONS.user} Editar persona</button>
         </div>
       </div>
     `;
@@ -328,7 +400,7 @@ VIEWS.overview = {
     this.bind(root);
   },
 
-  skeletonMetric(label) {
+  skelMetric(label) {
     return `
       <div class="metric">
         <div class="metric-label">${label}</div>
@@ -353,16 +425,12 @@ VIEWS.overview = {
 
       if (stateRes?.state) {
         state.config.transport = stateRes.state.transport || 'unknown';
-        const p = stateRes.state.metrics?.draftsPublished;
-        // config.mode viene de state
       }
 
       this.paint();
       this.updatePendingBadge(pendingRes.pending?.length || 0);
     } catch (err) {
-      if (err.message !== 'auth_required') {
-        toast(err.message, 'error');
-      }
+      if (err.message !== 'auth_required') toast(err.message, 'error');
     }
   },
 
@@ -373,21 +441,15 @@ VIEWS.overview = {
     const s = data.state;
     const health = state.lastHealth;
 
-    // Métricas
     const metrics = document.getElementById('ov-metrics');
     if (!metrics) return;
 
-    const uptime = s?.metrics?.totalCycles != null
-      ? this.fmtUptime((Date.now() - (health?.uptimeMs ? Date.now() - health.uptimeMs : Date.now())) / 1000)
-      : '—';
-
     const pendingCount = data.pending?.length || 0;
-    const totalActions = data.actions?.length || 0;
 
     metrics.innerHTML = `
       <div class="metric">
         <div class="metric-label">Uptime</div>
-        <div class="metric-value">${health ? this.fmtUptime(Math.round(health.uptimeMs / 1000)) : '—'}</div>
+        <div class="metric-value">${health ? fmtUptime(Math.round(health.uptimeMs / 1000)) : '—'}</div>
         <div class="metric-hint">${health?.ready ? 'ready' : 'no ready'}</div>
       </div>
       <div class="metric">
@@ -397,7 +459,7 @@ VIEWS.overview = {
       </div>
       <div class="metric">
         <div class="metric-label">Pending</div>
-        <div class="metric-value">${pendingCount}</div>
+        <div class="metric-value ${pendingCount > 0 ? 'warning' : ''}">${pendingCount}</div>
         <div class="metric-hint">${pendingCount > 0 ? 'requiere atención' : 'todo al día'}</div>
       </div>
       <div class="metric">
@@ -407,7 +469,6 @@ VIEWS.overview = {
       </div>
     `;
 
-    // Sistema
     const sys = document.getElementById('ov-system');
     if (sys && s) {
       const crisis = s.crisis || {};
@@ -425,10 +486,7 @@ VIEWS.overview = {
             <div class="card-title">Estado del sistema</div>
             <div class="card-sub">Loop autónomo y subsistemas</div>
           </div>
-          <div class="row">
-            ${crisisBadge}
-            ${transportBadge}
-          </div>
+          <div class="row">${crisisBadge}${transportBadge}</div>
         </div>
         <div class="session-rows">
           <div class="session-row"><span class="k">Loop</span><span class="v">${s.running ? 'en marcha' : 'pausado'}</span></div>
@@ -439,7 +497,6 @@ VIEWS.overview = {
       `;
     }
 
-    // Botón pause toggle
     const pauseBtn = document.getElementById('btn-toggle-pause');
     if (pauseBtn && s) {
       if (s.paused) {
@@ -450,16 +507,6 @@ VIEWS.overview = {
         pauseBtn.dataset.action = 'pause';
       }
     }
-  },
-
-  fmtUptime(seconds) {
-    if (!seconds || seconds < 0) return '0s';
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    const s = Math.floor(seconds % 60);
-    if (h > 0) return `${h}h ${m}m`;
-    if (m > 0) return `${m}m ${s}s`;
-    return `${s}s`;
   },
 
   updatePendingBadge(count) {
@@ -474,8 +521,8 @@ VIEWS.overview = {
   },
 
   bind(root) {
-    root.querySelector('#btn-tick')?.addEventListener('click', async () => {
-      const btn = root.querySelector('#btn-tick');
+    root.querySelector('#btn-tick')?.addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
       btn.disabled = true;
       try {
         await api('/api/social/tick', { method: 'POST' });
@@ -503,21 +550,35 @@ VIEWS.overview = {
       }
     });
 
-    root.querySelector('#btn-resume-crisis')?.addEventListener('click', async () => {
+    root.querySelector('#btn-resume-crisis')?.addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true;
       try {
         await api('/api/social/crisis/resume', { method: 'POST' });
         toast('Crisis resuelta', 'success');
         this.load();
       } catch (err) {
         if (err.message !== 'auth_required') toast(err.message, 'error');
+      } finally {
+        btn.disabled = false;
       }
+    });
+
+    root.querySelector('#btn-view-diagnostics')?.addEventListener('click', () => {
+      location.hash = '#/diagnostics';
+    });
+
+    root.querySelectorAll('[data-nav]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        location.hash = `#/${btn.dataset.nav}`;
+      });
     });
   },
 };
 
-// ============================================================
-// VIEW: PERSONA
-// ============================================================
+// ------------------------------------------------------------
+// VIEW: PERSONA (con editor visual + toggles)
+// ------------------------------------------------------------
 
 VIEWS.persona = {
   render(root) {
@@ -561,7 +622,7 @@ VIEWS.persona = {
         </div>
       `;
       content.querySelector('#btn-persona-create').addEventListener('click', () => {
-        this.showEditor(this.defaultPersona());
+        this.showEditor(null);
       });
       return;
     }
@@ -574,9 +635,36 @@ VIEWS.persona = {
           <span class="badge badge-neutral">${esc(persona.safetyLevel || 'strict')}</span>
         </div>
         <div class="row">
-          <button class="btn btn-secondary" id="btn-persona-edit">Editar</button>
-          <button class="btn btn-secondary" id="btn-persona-view-json">Ver JSON</button>
+          <button class="btn btn-secondary" id="btn-persona-edit">${ICONS.settings} Editar JSON</button>
+          <button class="btn btn-secondary" id="btn-persona-view-json">${ICONS.code} Ver JSON</button>
         </div>
+      </div>
+
+      <div class="card mb-16">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Modo operativo</div>
+            <div class="card-sub">Cambia sin reescribir toda la persona</div>
+          </div>
+        </div>
+        <div class="label-row">
+          <div>
+            <label class="label">Operating Mode</label>
+            <select class="select" id="sel-operating-mode">
+              <option value="draft" ${persona.operatingMode === 'draft' ? 'selected' : ''}>draft (requiere aprobación)</option>
+              <option value="auto" ${persona.operatingMode === 'auto' ? 'selected' : ''}>auto (publica sin aprobación)</option>
+            </select>
+          </div>
+          <div>
+            <label class="label">Safety Level</label>
+            <select class="select" id="sel-safety-level">
+              <option value="strict" ${persona.safetyLevel === 'strict' ? 'selected' : ''}>strict</option>
+              <option value="normal" ${persona.safetyLevel === 'normal' ? 'selected' : ''}>normal</option>
+              <option value="permissive" ${persona.safetyLevel === 'permissive' ? 'selected' : ''}>permissive</option>
+            </select>
+          </div>
+        </div>
+        <button class="btn btn-primary mt-12" id="btn-persona-mode-save">Guardar modo</button>
       </div>
 
       <div class="card mb-16">
@@ -596,15 +684,27 @@ VIEWS.persona = {
       </div>
 
       <div class="card mb-16">
-        <div class="card-title mb-12">Plataformas</div>
+        <div class="card-header">
+          <div>
+            <div class="card-title">Plataformas</div>
+            <div class="card-sub">Activa o desactiva sin editar el JSON</div>
+          </div>
+        </div>
         <div class="stack">
           ${['twitter', 'instagram', 'linkedin'].map(p => {
             const cfg = persona.platforms?.[p] || {};
             const enabled = !!cfg.enabled;
             return `
-              <div class="session-row">
-                <span class="k" style="text-transform: capitalize;">${p}</span>
-                <span class="badge ${enabled ? 'badge-success' : 'badge-neutral'}">${enabled ? 'enabled' : 'disabled'}</span>
+              <div class="row-between" style="padding: 10px 0; border-bottom: 1px solid var(--border);">
+                <div class="row">
+                  <span style="text-transform: capitalize; font-weight: 500;">${p}</span>
+                </div>
+                <div class="row">
+                  <span class="badge ${enabled ? 'badge-success' : 'badge-neutral'}" id="plat-badge-${p}">${enabled ? 'enabled' : 'disabled'}</span>
+                  <button class="btn btn-sm ${enabled ? 'btn-danger' : 'btn-success'}" data-platform="${p}" data-enabled="${enabled}">
+                    ${enabled ? 'Desactivar' : 'Activar'}
+                  </button>
+                </div>
               </div>
             `;
           }).join('')}
@@ -624,7 +724,7 @@ VIEWS.persona = {
             <div class="empty-desc">Las versiones aparecen al guardar cambios.</div>
           </div>
         ` : `
-          <div class="stack">
+          <div class="stack-sm">
             ${versions.map(v => `
               <div class="row-between" style="padding: 8px 0; border-bottom: 1px solid var(--border);">
                 <div class="row">
@@ -639,11 +739,46 @@ VIEWS.persona = {
       </div>
     `;
 
-    content.querySelector('#btn-persona-edit')?.addEventListener('click', () => {
-      this.showEditor(persona);
+    content.querySelector('#btn-persona-edit')?.addEventListener('click', () => this.showEditor(persona));
+    content.querySelector('#btn-persona-view-json')?.addEventListener('click', () => this.showJsonView(persona));
+
+    content.querySelector('#btn-persona-mode-save')?.addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      try {
+        const operatingMode = document.getElementById('sel-operating-mode').value;
+        const safetyLevel = document.getElementById('sel-safety-level').value;
+        await api('/api/admin/persona/mode', {
+          method: 'PATCH',
+          body: { operatingMode, safetyLevel },
+        });
+        toast('Modo actualizado', 'success');
+        this.load();
+      } catch (err) {
+        if (err.message !== 'auth_required') toast(err.message, 'error');
+      } finally {
+        btn.disabled = false;
+      }
     });
-    content.querySelector('#btn-persona-view-json')?.addEventListener('click', () => {
-      this.showJsonView(persona);
+
+    content.querySelectorAll('[data-platform]').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        const target = e.currentTarget;
+        const platform = target.dataset.platform;
+        const currentEnabled = target.dataset.enabled === 'true';
+        target.disabled = true;
+        try {
+          await api(`/api/admin/persona/platforms/${platform}`, {
+            method: 'PATCH',
+            body: { enabled: !currentEnabled },
+          });
+          toast(`${platform} ${!currentEnabled ? 'activada' : 'desactivada'}`, 'success');
+          this.load();
+        } catch (err) {
+          if (err.message !== 'auth_required') toast(err.message, 'error');
+          target.disabled = false;
+        }
+      });
     });
   },
 
@@ -682,9 +817,10 @@ VIEWS.persona = {
   },
 
   showEditor(persona) {
-    const json = JSON.stringify(persona, null, 2);
+    const data = persona || this.defaultPersona();
+    const json = JSON.stringify(data, null, 2);
     openModal(`
-      <div class="modal" style="max-width: 720px;">
+      <div class="modal modal-wide">
         <div class="modal-head">
           <div class="modal-title">${persona ? 'Editar' : 'Crear'} PersonaConfig</div>
           <div class="modal-desc">Pega el JSON completo. Se valida contra el schema Zod del servidor.</div>
@@ -742,13 +878,13 @@ VIEWS.persona = {
 
   showJsonView(persona) {
     openModal(`
-      <div class="modal" style="max-width: 720px;">
+      <div class="modal modal-wide">
         <div class="modal-head">
           <div class="modal-title">PersonaConfig</div>
           <div class="modal-desc">Versión ${persona.version ?? '?'} · solo lectura</div>
         </div>
         <div class="modal-body">
-          <pre class="textarea" style="min-height: 400px; white-space: pre; overflow: auto;">${esc(JSON.stringify(persona, null, 2))}</pre>
+          <pre class="output-pre" style="min-height: 400px;">${esc(JSON.stringify(persona, null, 2))}</pre>
         </div>
         <div class="modal-foot">
           <button class="btn btn-primary" onclick="closeModal()">Cerrar</button>
@@ -758,9 +894,9 @@ VIEWS.persona = {
   },
 };
 
-// ============================================================
+// ------------------------------------------------------------
 // VIEW: PENDING
-// ============================================================
+// ------------------------------------------------------------
 
 VIEWS.pending = {
   render(root) {
@@ -801,6 +937,7 @@ VIEWS.pending = {
     content.innerHTML = `
       <div class="row-between mb-16">
         <div class="text-sm muted">${items.length} acción${items.length === 1 ? '' : 'es'} esperando</div>
+        <button class="btn btn-secondary btn-sm" id="btn-cleanup-expired">Limpiar expirados</button>
       </div>
       <div class="pending-list">
         ${items.map(p => this.renderCard(p)).join('')}
@@ -812,6 +949,22 @@ VIEWS.pending = {
     });
     content.querySelectorAll('[data-action="reject"]').forEach(btn => {
       btn.addEventListener('click', () => this.reject(btn.dataset.id, btn));
+    });
+    content.querySelector('#btn-cleanup-expired')?.addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      try {
+        const r = await api('/api/admin/cleanup', {
+          method: 'POST',
+          body: { expiredPendings: true },
+        });
+        toast(`Limpiados: ${r.report?.expiredPendings || 0}`, 'success');
+        this.load();
+      } catch (err) {
+        if (err.message !== 'auth_required') toast(err.message, 'error');
+      } finally {
+        btn.disabled = false;
+      }
     });
   },
 
@@ -903,19 +1056,225 @@ VIEWS.pending = {
   },
 };
 
-// ============================================================
+// ------------------------------------------------------------
+// VIEW: SIGNALS
+// ------------------------------------------------------------
+
+VIEWS.signals = {
+  filters: { platform: '', decision: '', kind: '', search: '' },
+
+  render(root) {
+    root.innerHTML = `
+      <div class="toolbar">
+        <input class="input" id="sig-search" placeholder="Buscar en texto/autor/ID…" value="${esc(this.filters.search)}">
+        <select class="select" id="sig-platform">
+          <option value="">Todas las plataformas</option>
+          <option value="twitter">Twitter</option>
+          <option value="instagram">Instagram</option>
+          <option value="linkedin">LinkedIn</option>
+        </select>
+        <select class="select" id="sig-decision">
+          <option value="">Todas las decisiones</option>
+          <option value="publish">publish</option>
+          <option value="pending">pending</option>
+          <option value="reject">reject</option>
+          <option value="ignore">ignore</option>
+          <option value="skip">skip</option>
+          <option value="escalate">escalate</option>
+          <option value="error">error</option>
+        </select>
+        <select class="select" id="sig-kind">
+          <option value="">Todos los kinds</option>
+          <option value="mention">mention</option>
+          <option value="dm">dm</option>
+          <option value="comment">comment</option>
+          <option value="proactive_post">proactive_post</option>
+        </select>
+        <button class="btn btn-primary btn-sm" id="sig-refresh">${ICONS.refresh} Refrescar</button>
+      </div>
+      <div id="sig-counts" class="mb-12"></div>
+      <div id="sig-list"><div class="skeleton" style="height: 300px;"></div></div>
+    `;
+    this.bind(root);
+    this.load();
+  },
+
+  bind(root) {
+    const search = root.querySelector('#sig-search');
+    const platform = root.querySelector('#sig-platform');
+    const decision = root.querySelector('#sig-decision');
+    const kind = root.querySelector('#sig-kind');
+
+    platform.value = this.filters.platform;
+    decision.value = this.filters.decision;
+    kind.value = this.filters.kind;
+
+    const update = () => {
+      this.filters.search = search.value.trim();
+      this.filters.platform = platform.value;
+      this.filters.decision = decision.value;
+      this.filters.kind = kind.value;
+      this.load();
+    };
+
+    search.addEventListener('input', () => {
+      clearTimeout(this._searchTimer);
+      this._searchTimer = setTimeout(update, 300);
+    });
+    platform.addEventListener('change', update);
+    decision.addEventListener('change', update);
+    kind.addEventListener('change', update);
+    root.querySelector('#sig-refresh').addEventListener('click', () => this.load());
+  },
+
+  async load() {
+    try {
+      const params = new URLSearchParams();
+      params.set('limit', '200');
+      if (this.filters.platform) params.set('platform', this.filters.platform);
+      if (this.filters.decision) params.set('decision', this.filters.decision);
+      if (this.filters.kind) params.set('kind', this.filters.kind);
+
+      const data = await api(`/api/admin/signals?${params}`);
+      let signals = data.signals || [];
+
+      if (this.filters.search) {
+        const s = this.filters.search.toLowerCase();
+        signals = signals.filter(sig =>
+          (sig.text || '').toLowerCase().includes(s) ||
+          (sig.author || '').toLowerCase().includes(s) ||
+          (sig.id || '').toLowerCase().includes(s)
+        );
+      }
+
+      this.paint(signals, data.counts || {});
+    } catch (err) {
+      if (err.message !== 'auth_required') toast(err.message, 'error');
+    }
+  },
+
+  refresh() { this.load(); },
+
+  paint(signals, counts) {
+    const countEl = document.getElementById('sig-counts');
+    if (countEl) {
+      const total = Object.values(counts).reduce((a, b) => a + b, 0);
+      countEl.innerHTML = `
+        <div class="row" style="flex-wrap: wrap; gap: 6px;">
+          <span class="badge badge-neutral">total: ${total}</span>
+          ${Object.entries(counts).map(([k, v]) =>
+            `<span class="badge badge-neutral">${esc(k)}: ${v}</span>`
+          ).join('')}
+        </div>
+      `;
+    }
+
+    const list = document.getElementById('sig-list');
+    if (!list) return;
+
+    if (signals.length === 0) {
+      list.innerHTML = `
+        <div class="empty" style="padding-top: 60px;">
+          <div class="empty-icon">${ICONS.signal}</div>
+          <div class="empty-title">Sin señales</div>
+          <div class="empty-desc">${this.filters.search || this.filters.platform || this.filters.decision || this.filters.kind ? 'Ninguna señal coincide con los filtros.' : 'Aún no se han ingerido señales. El loop las recoge cada 90s.'}</div>
+        </div>
+      `;
+      return;
+    }
+
+    list.innerHTML = `
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Recibida</th>
+              <th>Plataforma</th>
+              <th>Kind</th>
+              <th>Autor</th>
+              <th>Texto</th>
+              <th>Decisión</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${signals.map(s => {
+              const decClass = s.decision === 'publish' ? 'badge-success'
+                : s.decision === 'error' ? 'badge-danger'
+                : s.decision === 'pending' ? 'badge-warning'
+                : s.decision === 'ignore' || s.decision === 'skip' ? 'badge-neutral'
+                : 'badge-info';
+              const decBadge = s.decision
+                ? `<span class="badge ${decClass}">${esc(s.decision)}</span>`
+                : '<span class="badge badge-neutral">pending</span>';
+              return `
+                <tr>
+                  <td class="cell-muted cell-mono text-xs">${rel(s.received_at)}</td>
+                  <td><span class="badge badge-info">${esc(s.platform)}</span></td>
+                  <td class="cell-mono text-xs">${esc(s.kind)}</td>
+                  <td class="cell-muted text-xs">${s.author ? '@' + esc(s.author) : '—'}</td>
+                  <td class="cell-truncate">${esc(truncate(s.text || '', 100))}</td>
+                  <td>${decBadge}</td>
+                  <td>
+                    <button class="btn btn-ghost btn-sm" data-reprocess="${esc(s.id)}" title="Reprocesar">${ICONS.play_circle}</button>
+                  </td>
+                </tr>
+              `;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    `;
+
+    list.querySelectorAll('[data-reprocess]').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        const target = e.currentTarget;
+        const id = target.dataset.reprocess;
+        target.disabled = true;
+        try {
+          await api(`/api/admin/signals/${encodeURIComponent(id)}/reprocess`, {
+            method: 'POST',
+          });
+          toast('Señal reprocesada', 'success');
+          this.load();
+        } catch (err) {
+          if (err.message !== 'auth_required') toast(err.message, 'error');
+          target.disabled = false;
+        }
+      });
+    });
+  },
+};
+
+// ------------------------------------------------------------
 // VIEW: ACTIONS
-// ============================================================
+// ------------------------------------------------------------
 
 VIEWS.actions = {
   render(root) {
-    root.innerHTML = `<div class="skeleton" style="height: 300px;"></div>`;
+    root.innerHTML = `
+      <div class="toolbar">
+        <select class="select" id="act-platform">
+          <option value="">Todas las plataformas</option>
+          <option value="twitter">Twitter</option>
+          <option value="instagram">Instagram</option>
+          <option value="linkedin">LinkedIn</option>
+        </select>
+        <button class="btn btn-primary btn-sm" id="act-refresh">${ICONS.refresh} Refrescar</button>
+      </div>
+      <div id="act-list"><div class="skeleton" style="height: 300px;"></div></div>
+    `;
+
+    root.querySelector('#act-refresh').addEventListener('click', () => this.load());
+    root.querySelector('#act-platform').addEventListener('change', () => this.load());
     this.load();
   },
 
   async load() {
     try {
-      const data = await api('/api/social/actions?limit=100');
+      const platform = document.getElementById('act-platform')?.value || '';
+      const qs = platform ? `?platform=${platform}&limit=100` : '?limit=100';
+      const data = await api(`/api/social/actions${qs}`);
       this.paint(data.actions || []);
     } catch (err) {
       if (err.message !== 'auth_required') toast(err.message, 'error');
@@ -925,9 +1284,11 @@ VIEWS.actions = {
   refresh() { this.load(); },
 
   paint(actions) {
-    const content = document.getElementById('content');
+    const list = document.getElementById('act-list');
+    if (!list) return;
+
     if (actions.length === 0) {
-      content.innerHTML = `
+      list.innerHTML = `
         <div class="empty" style="padding-top: 80px;">
           <div class="empty-icon">${ICONS.success}</div>
           <div class="empty-title">Sin acciones publicadas</div>
@@ -937,7 +1298,7 @@ VIEWS.actions = {
       return;
     }
 
-    content.innerHTML = `
+    list.innerHTML = `
       <div class="table-wrap">
         <table class="table">
           <thead>
@@ -968,9 +1329,9 @@ VIEWS.actions = {
   },
 };
 
-// ============================================================
+// ------------------------------------------------------------
 // VIEW: SESSIONS
-// ============================================================
+// ------------------------------------------------------------
 
 VIEWS.sessions = {
   render(root) {
@@ -1000,7 +1361,7 @@ VIEWS.sessions = {
   paintNoScraping() {
     const content = document.getElementById('content');
     content.innerHTML = `
-      <div class="alert alert-info mb-16">
+      <div class="alert alert-info">
         <div class="alert-icon">${ICONS.info}</div>
         <div class="alert-body">
           <strong>Transport actual: API oficial.</strong>
@@ -1075,7 +1436,6 @@ VIEWS.sessions = {
     try {
       await api(`/api/sessions/${platform}/login`, { method: 'POST' });
       toast(`Login iniciado en ${platform}`, 'info', 6000);
-      // Poll
       let tries = 0;
       const poll = setInterval(async () => {
         tries++;
@@ -1140,19 +1500,561 @@ VIEWS.sessions = {
   },
 };
 
-// ============================================================
-// VIEW: AUDIT
-// ============================================================
+// ------------------------------------------------------------
+// VIEW: DIAGNOSTICS
+// ------------------------------------------------------------
 
-VIEWS.audit = {
+VIEWS.diagnostics = {
   render(root) {
-    root.innerHTML = `<div class="skeleton" style="height: 300px;"></div>`;
+    root.innerHTML = `<div class="skeleton" style="height: 400px;"></div>`;
     this.load();
   },
 
   async load() {
     try {
-      const data = await api('/api/social/audit?limit=100');
+      const data = await api('/api/admin/health');
+      this.paint(data);
+    } catch (err) {
+      if (err.message !== 'auth_required') toast(err.message, 'error');
+    }
+  },
+
+  refresh() { this.load(); },
+
+  paint(h) {
+    const content = document.getElementById('content');
+    if (!h) return;
+
+    const mem = h.node?.memory || {};
+    const heapPct = mem.heapTotal ? Math.round((mem.heapUsed / mem.heapTotal) * 100) : 0;
+
+    content.innerHTML = `
+      <div class="metrics-grid">
+        <div class="metric">
+          <div class="metric-label">Uptime proceso</div>
+          <div class="metric-value">${fmtUptime(h.node?.uptimeSec || 0)}</div>
+          <div class="metric-hint">Node ${esc(h.node?.version || '')}</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Heap</div>
+          <div class="metric-value">${heapPct}%</div>
+          <div class="metric-hint">${fmtBytes(mem.heapUsed || 0)} / ${fmtBytes(mem.heapTotal || 0)}</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">RSS</div>
+          <div class="metric-value">${fmtBytes(mem.rss || 0)}</div>
+          <div class="metric-hint">memoria residente</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Circuit LLM</div>
+          <div class="metric-value ${h.llm?.circuit?.state === 'closed' ? 'success' : h.llm?.circuit?.state === 'open' ? 'danger' : 'warning'}">${esc(h.llm?.circuit?.state || '?')}</div>
+          <div class="metric-hint">${h.llm?.circuit?.consecutiveFailures || 0} fallos seguidos</div>
+        </div>
+      </div>
+
+      <div class="diag-grid">
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">Sistema</div>
+              <div class="card-sub">Loop y módulos</div>
+            </div>
+          </div>
+          <div class="session-rows">
+            <div class="session-row"><span class="k">Estado</span><span class="v">${h.system?.running ? 'running' : 'stopped'}</span></div>
+            <div class="session-row"><span class="k">Ciclos</span><span class="v">${h.system?.cycleCount || 0}</span></div>
+            <div class="session-row"><span class="k">Último ciclo</span><span class="v">${h.system?.lastCycleMs || 0}ms</span></div>
+            <div class="session-row"><span class="k">Fallidos</span><span class="v">${h.system?.metrics?.failedCycles || 0}</span></div>
+          </div>
+          <div class="card-sub mt-16 mb-8">Módulos registrados (${h.system?.modules?.length || 0})</div>
+          <div class="module-grid">
+            ${(h.system?.modules || []).map(m => `
+              <div class="module-card">
+                <span class="module-name">${esc(m)}</span>
+                <span class="module-dot"></span>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">LLM</div>
+              <div class="card-sub">${esc(h.llm?.provider || '')} · ${esc(h.llm?.model || '')}</div>
+            </div>
+          </div>
+          <div class="meter">
+            <div class="meter-head">
+              <span class="meter-label">Llamadas totales</span>
+              <span class="meter-value">${h.llm?.metrics?.totalCalls || 0}</span>
+            </div>
+          </div>
+          <div class="meter">
+            <div class="meter-head">
+              <span class="meter-label">Exitosas</span>
+              <span class="meter-value">${h.llm?.metrics?.successfulCalls || 0}</span>
+            </div>
+            <div class="meter-bar"><div class="meter-fill success" style="width: ${h.llm?.metrics?.totalCalls ? Math.round((h.llm.metrics.successfulCalls / h.llm.metrics.totalCalls) * 100) : 0}%"></div></div>
+          </div>
+          <div class="meter">
+            <div class="meter-head">
+              <span class="meter-label">Fallidas</span>
+              <span class="meter-value">${h.llm?.metrics?.failedCalls || 0}</span>
+            </div>
+            <div class="meter-bar"><div class="meter-fill danger" style="width: ${h.llm?.metrics?.totalCalls ? Math.round((h.llm.metrics.failedCalls / h.llm.metrics.totalCalls) * 100) : 0}%"></div></div>
+          </div>
+          <div class="meter">
+            <div class="meter-head">
+              <span class="meter-label">Rechazos por breaker</span>
+              <span class="meter-value">${h.llm?.metrics?.rejectionsByBreaker || 0}</span>
+            </div>
+          </div>
+          <div class="meter">
+            <div class="meter-head">
+              <span class="meter-label">Latencia media</span>
+              <span class="meter-value">${h.llm?.metrics?.avgLatencyMs || 0}ms</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">DB</div>
+              <div class="card-sub">SQLite</div>
+            </div>
+          </div>
+          <div class="session-rows">
+            <div class="session-row"><span class="k">Actions</span><span class="v">${h.db?.actions ?? 0}</span></div>
+            <div class="session-row"><span class="k">Pending</span><span class="v">${h.db?.pending ?? 0}</span></div>
+            <div class="session-row"><span class="k">Signals</span><span class="v">${h.db?.signals ?? 0}</span></div>
+            <div class="session-row"><span class="k">Audit</span><span class="v">${h.db?.audit ?? 0}</span></div>
+            <div class="session-row"><span class="k">Crisis</span><span class="v">${h.db?.crisis ?? 0}</span></div>
+          </div>
+          <div class="card-sub mt-16 mb-8">Signals por decisión</div>
+          <div class="stack-sm">
+            ${Object.entries(h.dbCounts?.signalsByDecision || {}).map(([k, v]) => `
+              <div class="row-between">
+                <span class="badge badge-neutral">${esc(k)}</span>
+                <span class="mono text-sm">${v}</span>
+              </div>
+            `).join('') || '<div class="muted text-sm">Sin datos</div>'}
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <div class="card-title">Crisis & Ingestion</div>
+              <div class="card-sub">Estado de subsistemas</div>
+            </div>
+          </div>
+          <div class="session-rows">
+            <div class="session-row"><span class="k">Crisis activa</span><span class="v">${h.crisis?.paused ? 'sí' : 'no'}</span></div>
+            <div class="session-row"><span class="k">Negativas ventana</span><span class="v">${h.crisis?.negativeSignalsInWindow || 0} / ${h.crisis?.negativeThreshold || 0}</span></div>
+            <div class="session-row"><span class="k">Señales nuevas</span><span class="v">${h.ingester?.metrics?.signalsNew || 0}</span></div>
+            <div class="session-row"><span class="k">Clasificadas</span><span class="v">${h.classifier?.metrics?.classified || 0}</span></div>
+            <div class="session-row"><span class="k">Eventos bus</span><span class="v">${h.eventBus?.emitted || 0}</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card mt-16">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Node process</div>
+            <div class="card-sub">Detalles de ejecución</div>
+          </div>
+          <button class="btn btn-secondary btn-sm" id="diag-refresh">${ICONS.refresh} Refrescar</button>
+        </div>
+        <div class="session-rows">
+          <div class="session-row"><span class="k">PID</span><span class="v mono">${h.node?.pid || '—'}</span></div>
+          <div class="session-row"><span class="k">Plataforma</span><span class="v">${esc(h.node?.platform || '')}</span></div>
+          <div class="session-row"><span class="k">Uptime</span><span class="v">${fmtUptime(h.node?.uptimeSec || 0)}</span></div>
+        </div>
+      </div>
+    `;
+
+    content.querySelector('#diag-refresh')?.addEventListener('click', () => this.load());
+  },
+};
+
+// ------------------------------------------------------------
+// VIEW: CRISIS
+// ------------------------------------------------------------
+
+VIEWS.crisis = {
+  render(root) {
+    root.innerHTML = `<div class="skeleton" style="height: 400px;"></div>`;
+    this.load();
+  },
+
+  async load() {
+    try {
+      const data = await api('/api/admin/crisis');
+      this.paint(data);
+    } catch (err) {
+      if (err.message !== 'auth_required') toast(err.message, 'error');
+    }
+  },
+
+  refresh() { this.load(); },
+
+  paint(data) {
+    const content = document.getElementById('content');
+    const current = data.current || {};
+    const events = data.events || [];
+
+    const isPaused = current.paused;
+    const heroClass = isPaused ? '' : 'ok';
+
+    content.innerHTML = `
+      <div class="crisis-hero ${heroClass}">
+        <div class="crisis-hero-icon">${isPaused ? ICONS.warning : ICONS.check}</div>
+        <div class="crisis-hero-body">
+          <div class="crisis-hero-title">${isPaused ? 'Crisis activa — loop pausado' : 'Sistema operativo'}</div>
+          <div class="crisis-hero-desc">
+            ${isPaused
+              ? `Razón: <strong>${esc(current.pauseReason || '—')}</strong>. Pausa restante: <strong>${Math.ceil((current.pauseRemainingMs || 0) / 60000)}min</strong>. El loop reanudará automáticamente al expirar.`
+              : 'Sin crisis activa. El loop opera normalmente. Las crisis se disparan por amenazas legales, DMs urgentes, umbral de negativas o challenge de scraping.'}
+          </div>
+          <div class="crisis-hero-actions">
+            ${isPaused
+              ? `<button class="btn btn-success" id="crisis-resume">${ICONS.play} Resolver ahora</button>`
+              : `<button class="btn btn-warning" id="crisis-force">${ICONS.warning} Forzar crisis manual</button>`}
+          </div>
+        </div>
+      </div>
+
+      <div class="card mb-16">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Umbral de crisis</div>
+            <div class="card-sub">Negativas por ventana</div>
+          </div>
+        </div>
+        <div class="session-rows">
+          <div class="session-row"><span class="k">Negativas en ventana</span><span class="v">${current.negativeSignalsInWindow || 0} / ${current.negativeThreshold || 0}</span></div>
+          <div class="session-row"><span class="k">Ventana</span><span class="v">${current.windowMin || 0} min</span></div>
+          <div class="session-row"><span class="k">Crisis detectadas</span><span class="v">${current.metrics?.crisisDetected || 0}</span></div>
+          <div class="session-row"><span class="k">Crisis resueltas</span><span class="v">${current.metrics?.crisisResolved || 0}</span></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Historial</div>
+            <div class="card-sub">${events.length} evento${events.length === 1 ? '' : 's'}</div>
+          </div>
+        </div>
+        ${events.length === 0 ? `
+          <div class="empty">
+            <div class="empty-title">Sin crisis registradas</div>
+            <div class="empty-desc">Las crisis aparecen aquí al detectarse.</div>
+          </div>
+        ` : `
+          <div>
+            ${events.map(e => `
+              <div class="crisis-event">
+                <div class="crisis-event-body">
+                  <div class="crisis-event-title">${esc(e.reason)}</div>
+                  <div class="crisis-event-meta">
+                    ${fmtDate(e.detected_at)}
+                    ${e.signal_ids?.length ? ` · ${e.signal_ids.length} señal(es)` : ''}
+                    ${e.resumed_at ? ` · resuelta ${rel(e.resumed_at)}` : ' · <span style="color: var(--danger-hi);">activa</span>'}
+                  </div>
+                </div>
+                <span class="badge ${e.resumed_at ? 'badge-success' : 'badge-danger'}">${e.resumed_at ? 'resuelta' : 'activa'}</span>
+              </div>
+            `).join('')}
+          </div>
+        `}
+      </div>
+    `;
+
+    content.querySelector('#crisis-resume')?.addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      try {
+        await api('/api/admin/crisis/resume', { method: 'POST' });
+        toast('Crisis resuelta', 'success');
+        this.load();
+      } catch (err) {
+        if (err.message !== 'auth_required') toast(err.message, 'error');
+        btn.disabled = false;
+      }
+    });
+
+    content.querySelector('#crisis-force')?.addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      const reason = prompt('Razón de la crisis manual:', 'intervencion_manual');
+      if (!reason) return;
+      btn.disabled = true;
+      try {
+        await api('/api/admin/crisis/force', {
+          method: 'POST',
+          body: { reason },
+        });
+        toast('Crisis forzada', 'warning');
+        this.load();
+      } catch (err) {
+        if (err.message !== 'auth_required') toast(err.message, 'error');
+        btn.disabled = false;
+      }
+    });
+  },
+};
+
+// ------------------------------------------------------------
+// VIEW: PLAYGROUND
+// ------------------------------------------------------------
+
+VIEWS.playground = {
+  lastResult: null,
+
+  render(root) {
+    root.innerHTML = `
+      <div class="playground-split">
+        <div class="playground-panel">
+          <div class="playground-panel-header">
+            <div>
+              <div class="card-title">Input</div>
+              <div class="card-sub">Configura la señal de prueba</div>
+            </div>
+          </div>
+
+          <div class="stack">
+            <div class="label-row">
+              <div>
+                <label class="label">Plataforma</label>
+                <select class="select" id="pg-platform">
+                  <option value="twitter">Twitter</option>
+                  <option value="instagram">Instagram</option>
+                  <option value="linkedin">LinkedIn</option>
+                </select>
+              </div>
+              <div>
+                <label class="label">Kind</label>
+                <select class="select" id="pg-kind">
+                  <option value="proactive_post">proactive_post</option>
+                  <option value="mention">mention</option>
+                  <option value="dm">dm</option>
+                  <option value="comment">comment</option>
+                </select>
+              </div>
+            </div>
+
+            <div>
+              <label class="label">Author (opcional)</label>
+              <input class="input" id="pg-author" placeholder="@usuario">
+            </div>
+
+            <div>
+              <label class="label">Texto de la señal (opcional)</label>
+              <textarea class="textarea" id="pg-text" placeholder="Ej: 'Hola, me encanta tu contenido sobre X'"></textarea>
+            </div>
+
+            <div>
+              <label class="label">Task custom (opcional)</label>
+              <textarea class="textarea" id="pg-task" style="min-height: 60px;" placeholder="Instrucción específica al LLM"></textarea>
+            </div>
+
+            <div class="row" style="flex-wrap: wrap; gap: 8px;">
+              <button class="btn btn-secondary" id="pg-preview">${ICONS.code} Preview prompts</button>
+              <button class="btn btn-primary" id="pg-test">${ICONS.zap} Generar draft (consume tokens)</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="playground-panel">
+          <div class="playground-panel-header">
+            <div>
+              <div class="card-title">Output</div>
+              <div class="card-sub" id="pg-output-sub">Esperando…</div>
+            </div>
+          </div>
+
+          <div id="pg-output" style="flex: 1; display: flex; flex-direction: column;">
+            <div class="empty" style="padding-top: 40px; margin: auto 0;">
+              <div class="empty-icon">${ICONS.zap}</div>
+              <div class="empty-title">Sin resultados</div>
+              <div class="empty-desc">Usa "Preview prompts" para ver el prompt sin consumir tokens, o "Generar draft" para probar el LLM de verdad.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    root.querySelector('#pg-preview').addEventListener('click', () => this.preview());
+    root.querySelector('#pg-test').addEventListener('click', () => this.test());
+  },
+
+  refresh() {},
+
+  buildBody() {
+    return {
+      platform: document.getElementById('pg-platform').value,
+      kind: document.getElementById('pg-kind').value,
+      author: document.getElementById('pg-author').value.trim() || null,
+      text: document.getElementById('pg-text').value.trim() || null,
+      task: document.getElementById('pg-task').value.trim() || null,
+    };
+  },
+
+  async preview() {
+    const btn = document.getElementById('pg-preview');
+    btn.disabled = true;
+    const out = document.getElementById('pg-output');
+    const sub = document.getElementById('pg-output-sub');
+    sub.textContent = 'Generando preview…';
+    try {
+      const data = await api('/api/admin/llm/preview', {
+        method: 'POST',
+        body: this.buildBody(),
+      });
+      sub.textContent = `${data.provider} · ${data.model} · ${data.estimatedInputChars} chars input`;
+      out.innerHTML = `
+        <div class="text-xs muted mb-8">SYSTEM PROMPT</div>
+        <div class="output-pre" style="min-height: 200px; max-height: 300px; overflow: auto; margin-bottom: 14px;">${esc(data.systemPrompt)}</div>
+        <div class="text-xs muted mb-8">USER MESSAGE</div>
+        <div class="output-pre" style="min-height: 80px; max-height: 150px; overflow: auto;">${esc(data.userMessage)}</div>
+      `;
+    } catch (err) {
+      if (err.message !== 'auth_required') {
+        sub.textContent = 'Error';
+        toast(err.message, 'error');
+      }
+    } finally {
+      btn.disabled = false;
+    }
+  },
+
+  async test() {
+    const btn = document.getElementById('pg-test');
+    btn.disabled = true;
+    const out = document.getElementById('pg-output');
+    const sub = document.getElementById('pg-output-sub');
+    sub.textContent = 'Llamando al LLM…';
+    out.innerHTML = `
+      <div class="empty" style="padding-top: 40px; margin: auto 0;">
+        <div class="empty-icon">${ICONS.zap}</div>
+        <div class="empty-title">Generando…</div>
+        <div class="empty-desc">Espera mientras el LLM procesa.</div>
+      </div>
+    `;
+    try {
+      const data = await api('/api/admin/llm/test', {
+        method: 'POST',
+        body: this.buildBody(),
+      });
+
+      if (!data.ok) {
+        sub.textContent = `Error: ${data.error}`;
+        out.innerHTML = `
+          <div class="alert alert-danger">
+            <div class="alert-icon">${ICONS.error}</div>
+            <div class="alert-body"><strong>Falló la generación:</strong> ${esc(data.error)}</div>
+          </div>
+        `;
+        return;
+      }
+
+      this.lastResult = data;
+      const guard = data.guard;
+      const usage = data.usage || {};
+      const usageStr = usage.total_tokens
+        ? `${usage.total_tokens} tokens (${usage.prompt_tokens || 0} in / ${usage.completion_tokens || 0} out)`
+        : '—';
+
+      sub.textContent = `${data.latencyMs}ms · v${data.personaVersion}`;
+
+      out.innerHTML = `
+        <div class="row mb-12" style="flex-wrap: wrap; gap: 6px;">
+          <span class="usage-chip">${ICONS.clock} ${data.latencyMs}ms</span>
+          <span class="usage-chip">${esc(usageStr)}</span>
+          ${data.skipped ? '<span class="badge badge-warning">SKIPPED</span>' : '<span class="badge badge-success">ok</span>'}
+        </div>
+
+        <div class="output-draft">${esc(data.text || '(vacío)')}</div>
+
+        ${guard ? `
+          <div class="text-xs muted mb-8 mt-16">GUARD RESULT</div>
+          <div class="alert ${guard.ok ? 'alert-success' : 'alert-danger'}">
+            <div class="alert-icon">${guard.ok ? ICONS.check : ICONS.error}</div>
+            <div class="alert-body">
+              <strong>${guard.ok ? 'Aprobado por Guard' : 'Rechazado por Guard'}</strong>
+              · decisión: <span class="inline-code">${esc(guard.decision)}</span>
+            </div>
+          </div>
+          ${guard.errors?.length ? `
+            <div class="guard-checks mt-12">
+              ${guard.errors.map(e => `
+                <div class="guard-check err">
+                  <span class="guard-check-icon">${ICONS.error}</span>
+                  <span><strong>${esc(e.code)}</strong>: ${esc(e.detail || '')}</span>
+                </div>
+              `).join('')}
+            </div>
+          ` : ''}
+          ${guard.warnings?.length ? `
+            <div class="guard-checks mt-12">
+              ${guard.warnings.map(w => `
+                <div class="guard-check warn">
+                  <span class="guard-check-icon">${ICONS.warning}</span>
+                  <span><strong>${esc(w.code)}</strong>: ${esc(w.detail || '')}</span>
+                </div>
+              `).join('')}
+            </div>
+          ` : ''}
+        ` : ''}
+      `;
+    } catch (err) {
+      if (err.message !== 'auth_required') {
+        sub.textContent = 'Error';
+        out.innerHTML = `
+          <div class="alert alert-danger">
+            <div class="alert-icon">${ICONS.error}</div>
+            <div class="alert-body">${esc(err.message)}</div>
+          </div>
+        `;
+      }
+    } finally {
+      btn.disabled = false;
+    }
+  },
+};
+
+// ------------------------------------------------------------
+// VIEW: AUDIT
+// ------------------------------------------------------------
+
+VIEWS.audit = {
+  render(root) {
+    root.innerHTML = `
+      <div class="toolbar">
+        <select class="select" id="audit-category">
+          <option value="">Todas las categorías</option>
+          <option value="system">system</option>
+          <option value="social">social</option>
+          <option value="persona">persona</option>
+          <option value="crisis">crisis</option>
+        </select>
+        <button class="btn btn-primary btn-sm" id="audit-refresh">${ICONS.refresh} Refrescar</button>
+      </div>
+      <div id="audit-list"><div class="skeleton" style="height: 300px;"></div></div>
+    `;
+    root.querySelector('#audit-refresh').addEventListener('click', () => this.load());
+    root.querySelector('#audit-category').addEventListener('change', () => this.load());
+    this.load();
+  },
+
+  async load() {
+    try {
+      const category = document.getElementById('audit-category')?.value || '';
+      const qs = category ? `?category=${category}&limit=200` : '?limit=200';
+      const data = await api(`/api/social/audit${qs}`);
       this.paint(data.audit || []);
     } catch (err) {
       if (err.message !== 'auth_required') toast(err.message, 'error');
@@ -1162,9 +2064,11 @@ VIEWS.audit = {
   refresh() { this.load(); },
 
   paint(items) {
-    const content = document.getElementById('content');
+    const list = document.getElementById('audit-list');
+    if (!list) return;
+
     if (items.length === 0) {
-      content.innerHTML = `
+      list.innerHTML = `
         <div class="empty" style="padding-top: 80px;">
           <div class="empty-icon">${ICONS.info}</div>
           <div class="empty-title">Sin eventos</div>
@@ -1174,7 +2078,7 @@ VIEWS.audit = {
       return;
     }
 
-    content.innerHTML = `
+    list.innerHTML = `
       <div class="table-wrap">
         <table class="table">
           <thead>
@@ -1212,9 +2116,9 @@ VIEWS.audit = {
   },
 };
 
-// ============================================================
+// ------------------------------------------------------------
 // VIEW: SETTINGS
-// ============================================================
+// ------------------------------------------------------------
 
 VIEWS.settings = {
   render(root) {
@@ -1241,6 +2145,23 @@ VIEWS.settings = {
       <div class="card mb-16">
         <div class="card-header">
           <div>
+            <div class="card-title">Export / Backup</div>
+            <div class="card-sub">Descarga la DB completa en JSON</div>
+          </div>
+        </div>
+        <div class="row" style="flex-wrap: wrap; gap: 8px;">
+          <a class="btn btn-primary" href="/api/admin/export" download>${ICONS.download} Export todo</a>
+          <a class="btn btn-secondary" href="/api/admin/export?include=persona,actions" download>${ICONS.download} Solo persona + actions</a>
+        </div>
+        <div class="text-xs muted mt-8">
+          Los archivos exportados incluyen la API key no; necesitas el header <span class="inline-code">x-api-key</span> para descargar.
+          Si el navegador no añade el header, ejecuta <span class="inline-code">curl -H "x-api-key: ..." /api/admin/export</span>.
+        </div>
+      </div>
+
+      <div class="card mb-16">
+        <div class="card-header">
+          <div>
             <div class="card-title">Sistema</div>
             <div class="card-sub">Configuración de solo lectura</div>
           </div>
@@ -1248,27 +2169,26 @@ VIEWS.settings = {
         <div class="session-rows">
           <div class="session-row"><span class="k">Transport</span><span class="v">${esc(state.config.transport)}</span></div>
           <div class="session-row"><span class="k">NODE_ENV</span><span class="v">${esc(state.lastHealth?.env || '—')}</span></div>
-          <div class="session-row"><span class="k">Modo operativo</span><span class="v">${esc(state.config.mode)}</span></div>
-          <div class="session-row"><span class="k">Safety level</span><span class="v">${esc(state.config.safety)}</span></div>
         </div>
       </div>
 
       <div class="card">
         <div class="card-header">
           <div>
-            <div class="card-title">Endpoints</div>
+            <div class="card-title">Endpoints disponibles</div>
             <div class="card-sub">Todos requieren x-api-key</div>
           </div>
         </div>
-        <div class="stack text-xs mono">
-          <div><span class="badge badge-info">GET</span> /health</div>
-          <div><span class="badge badge-info">GET</span> /health/readyz</div>
-          <div><span class="badge badge-info">GET</span> /api/persona</div>
-          <div><span class="badge badge-info">GET</span> /api/social/state</div>
-          <div><span class="badge badge-info">GET</span> /api/social/pending</div>
-          <div><span class="badge badge-info">GET</span> /api/social/actions</div>
-          <div><span class="badge badge-info">GET</span> /api/social/audit</div>
+        <div class="stack-sm text-xs mono">
+          <div><span class="badge badge-info">GET</span> /health · /health/readyz</div>
+          <div><span class="badge badge-info">GET</span> /api/persona · /api/persona/state · /api/persona/history</div>
+          <div><span class="badge badge-info">GET</span> /api/social/state · /pending · /actions · /audit</div>
           <div><span class="badge badge-info">GET</span> /api/sessions</div>
+          <div><span class="badge badge-info">GET</span> /api/admin/config · /health · /signals · /crisis · /memory · /export · /db/stats</div>
+          <div><span class="badge badge-success">POST</span> /api/social/tick · /pause · /resume · /crisis/resume</div>
+          <div><span class="badge badge-success">POST</span> /api/admin/crisis/force · /crisis/resume · /cleanup</div>
+          <div><span class="badge badge-success">POST</span> /api/admin/llm/preview · /llm/test · /signals/:id/reprocess</div>
+          <div><span class="badge badge-warning">PATCH</span> /api/admin/persona/mode · /persona/platforms/:p</div>
         </div>
       </div>
     `;
@@ -1297,7 +2217,7 @@ VIEWS.settings = {
 };
 
 // ============================================================
-// BOOT
+// SETUP
 // ============================================================
 
 function setupRouter() {
@@ -1332,13 +2252,11 @@ async function boot() {
   } else {
     try {
       await api('/api/persona').catch((e) => { if (e.status !== 404) throw e; });
-    } catch (err) {
-      // Key inválida, ya se mostró modal
-    }
+    } catch (err) {}
   }
 
   await pollHealth();
-  setInterval(pollHealth, HEALTH_MS);
+  state.timers.health = setInterval(pollHealth, HEALTH_MS);
 
   const initial = location.hash.replace(/^#\//, '') || 'overview';
   navigate(initial);
